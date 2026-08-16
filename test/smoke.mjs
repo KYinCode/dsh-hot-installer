@@ -6,7 +6,7 @@ import assert from 'node:assert/strict'
 import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { readBundles, diffBundles, resolveBundleDir, parsePatchList, dedupeInserts } from '../index.mjs'
+import { readBundles, diffBundles, resolveBundleDir, parsePatchList, dedupeInserts, deepEqual, removePatches } from '../index.mjs'
 
 test('readBundles: reads the bundle layer, tolerates missing shapes', () => {
   assert.deepEqual(readBundles({ dsh: { profile: { bundles: ['a', 'b'] } } }), ['a', 'b'])
@@ -74,4 +74,43 @@ test('dedupeInserts: skips colliding row ids, keeps the rest verbatim', () => {
   // rows without an id are never deduped
   const noId = dedupeInserts([{ insert: [{ name: 'x' }] }], existing)
   assert.deepEqual(noId, [{ insert: [{ name: 'x' }] }])
+})
+
+test('deepEqual: structural equality for loader patch values', () => {
+  assert.equal(deepEqual({ id: 'a', name: 'b' }, { id: 'a', name: 'b' }), true)
+  assert.equal(deepEqual({ id: 'a' }, { id: 'a', name: 'b' }), false)
+  assert.equal(deepEqual({ insert: [{ id: 'x' }] }, { insert: [{ id: 'x' }] }), true)
+  assert.equal(deepEqual({ disabled: { __jsExpr: 'a' } }, { disabled: { __jsExpr: 'a' } }), true)
+  assert.equal(deepEqual({ disabled: { __jsExpr: 'a' } }, { disabled: { __jsExpr: 'b' } }), false)
+  assert.equal(deepEqual([1, 2], [1, 2]), true)
+  assert.equal(deepEqual([1, 2], [2, 1]), false)
+  assert.equal(deepEqual(null, null), true)
+  assert.equal(deepEqual(undefined, undefined), true)
+  assert.equal(deepEqual({ a: undefined }, { b: undefined }), false)
+})
+
+test('removePatches: strips a bundle\'s rows once each, leaves the rest', () => {
+  const include = [
+    { insert: [{ id: 'a', name: 'pkg-a' }] },
+    { insert: [{ id: 'b', name: 'pkg-b' }] },
+    { id: 'shared', config: { x: 1 } },
+    { insert: [{ id: 'c', name: 'pkg-c' }] },
+  ]
+  // removing bundle B strips exactly its entry
+  const out = removePatches(include, [{ insert: [{ id: 'b', name: 'pkg-b' }] }])
+  assert.deepEqual(out, [
+    { insert: [{ id: 'a', name: 'pkg-a' }] },
+    { id: 'shared', config: { x: 1 } },
+    { insert: [{ id: 'c', name: 'pkg-c' }] },
+  ])
+  // entries not present are ignored (no throw, no removal)
+  assert.deepEqual(removePatches(include, [{ insert: [{ id: 'nope' }] }]), include)
+  // duplicates: each recorded entry removes at most one occurrence
+  const dup = removePatches(
+    [{ insert: [{ id: 'x' }] }, { insert: [{ id: 'x' }] }],
+    [{ insert: [{ id: 'x' }] }, { insert: [{ id: 'x' }] }],
+  )
+  assert.deepEqual(dup, [])
+  // the input list is never mutated
+  assert.equal(include.length, 4)
 })

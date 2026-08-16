@@ -68,3 +68,18 @@ bundle 的 `cordis.patch.yml` → 把其行注入 root include entry → 热生�
   无 HMR 的面永远不会启动监听，boot 不可能失败。
 - **验证**：`dsh --profile hotboot`（临时 scratch profile，base + hot-installer）
   实测 boot 成功、插件日志出现 `active`；web profile 已重装 `dsh-hot-installer@^0.1.1`。
+
+## 0.2.0 记录（2026-08-16）— V2：remove 热卸载
+
+- **动机**：v1 卸载后行保留到重启，期间刷新页面报 "Failed to load plugins"
+  （客户端仍向已删除的包要 bundle，404）——真实用户可见故障。
+- **实现**：包→行映射（启动时扫描 manifest 全部 bundle 建立 + 每次热装更新，
+  仅内存）；manifest diff 增加 removed 分支，按深度相等从 include config.patches
+  逐个摘除该包贡献的 patch 条目再 `entry.update`，loader 当场卸载行。
+  新增纯函数 `deepEqual` / `removePatches`（有单测）。
+- **验证**（scratch profile hotboot2，registry 0.2.0）：boot 挂载的 dsh-alive
+  remove → `hot-removed`（8ms）；热装的 dsh-alive remove → `hot-removed`（5ms）；
+  add→remove 循环无残留。
+- **README 已重写**（段落式），边界写入"已知边界"节。
+- web profile 已装 `dsh-hot-installer@^0.2.0`（下次重启生效；运行中的 0.1.1
+  继续工作到重启为止，无回归）。

@@ -1,102 +1,44 @@
 # dsh-hot-installer
 
-**Hot-install profile bundles for DeepSeek Harness — install once, restart once, then never again.**
+**Once installed, `dsh plugin add` and `dsh plugin remove` never require a restart again.** Install once, restart once, and this plugin watches your profile's bundle list for you: newly added packages mount immediately, removed ones unload immediately.
 
-`dsh plugin add <pkg>` installs a bundle, but the new bundle only mounts after
-restarting `dsh`. The bundle list (`dsh.profile.bundles`) is composed at boot,
-and HMR only watches the user patch files — installing packages is the one
-cold path in an otherwise hot tree.
+## What it is
 
-This plugin closes it. It watches the profile manifest through the same HMR
-mechanism app-boot uses for `cordis.patch.yml`, and when a new bundle appears
-it reads the package's `cordis.patch.yml`, appends it to the root include
-entry's patch list, and lets the loader diff activate the new rows live
-(measured ~8 ms in the PoC).
+In DeepSeek Harness everything is a plugin, but after `dsh plugin --profile web add <pkg>` you had to restart `dsh web` for the new bundle to mount — the profile's bundle list (`dsh.profile.bundles` in `package.json`) is only read at startup and nothing in the running process watches it. Removal was worse: `dsh plugin remove <pkg>` deletes the package from disk, but the mounted plugin row stays alive in memory, so the next page reload shows "Failed to load plugins" — the client still asks the deleted package for its code.
 
-## Install
+This plugin turns that one cold path hot. It lives in the profile and watches the manifest file: when a new bundle appears it reads the package's declared patch (`cordis.patch.yml`) and injects the rows into the live plugin tree, which the loader's diff activates in milliseconds; when a bundle disappears it strips the matching rows (tracked via a package→rows map built at startup) and the loader unloads them on the spot. Nothing is written to your config files or patch layer, and after a restart the tree composes exactly as a normal boot would.
 
-```bash
-# one-time install (into the profile you run, e.g. web):
+## Install & use
+
+```sh
+# one-time install (use your actual profile name), then restart dsh once
 dsh plugin --profile web add dsh-hot-installer
-
-# restart dsh once so the plugin mounts
 ```
 
-That's it. From now on:
+From then on, your usual commands just work without restarts:
 
-```bash
-# new bundle — takes effect immediately, no restart:
-dsh plugin --profile web add some-other-bundle
+```sh
+dsh plugin --profile web add some-plugin      # live, no restart
+dsh plugin --profile web remove some-plugin   # live unload, no restart, no page errors
 ```
+
+Every hot install/remove is logged to `~/.dsh/logs/dsh-hot-installer/dsh-hot-installer.log` (e.g. `hot-applied dsh-alive (1 patch entry)`, `hot-removed dsh-alive (1 patch entry)`).
 
 ## How it works
 
-```
-dsh-hot-installer (mounted as a profile bundle)
-  ├─ hmr.registerConfig(<profile>/package.json, refresh)   // same API as watchUserPatches
-  ├─ on change (debounced):
-  │    1. diff dsh.profile.bundles snapshot -> newly added bundle names
-  │    2. resolve the installed package (node_modules lookup from the profile)
-  │    3. read its dsh.bundle.patch (cordis.patch.yml) -> patch list
-  │    4. dedupe insert rows against the live tree, append the rest
-  │       to the root include entry's config.patches
-  │    5. entry.update({ config }) -> loader diff activates the rows live
-  └─ on failure: keep the old config, log "restart required for <pkg>"
-```
+On every manifest change (`dsh plugin add` writes twice — pnpm's dependency pass, then the bundle reconciliation — so changes are debounced by 300ms), the plugin diffs its snapshot against the new bundle list to find additions and removals. For an addition it resolves the package under the profile's node_modules, reads the patch file its `dsh.bundle.patch` points to (parsed with the exact YAML dialect boot uses, `!!js` expressions included), appends the parsed entries to the root include entry's `config.patches`, and calls `entry.update` — the same channel boot mounts plugins through, so hot and cold installs compose identically. For a removal it does the reverse: strips that package's recorded entries from `config.patches` (deep-equality match, one removal per entry) and updates the entry, and the loader unloads the rows. The package→rows map is built at startup for every bundle already in the manifest (so boot-mounted packages are removable too) and extended on each hot install; it lives in memory only.
 
-Design notes:
+## Known limits
 
-- **The injected rows compose identically to boot.** The patch list lands in
-  the same `config.patches` slot boot fills, through the same include entry,
-  so a later restart produces exactly the same tree. Nothing is written back
-  to disk — injections live in memory only (the include's `write()` is a
-  no-op in this deployment).
-- **Duplicate ids are skipped, not duplicated.** If an inserted row's id
-  already exists in the live tree (an earlier bundle, or your own
-  `cordis.patch.yml`), that row is left out; id-targeted patches pass through
-  untouched.
-- **v1 is add-only.** `dsh plugin remove` keeps the rows mounted until the
-  next restart — removal needs a bundle→row mapping and is v2 work.
-- **Failures are per-bundle and non-destructive.** A bundle that cannot be
-  resolved or parsed is logged as `restart required for <pkg>`; already
-  applied bundles and the existing tree are untouched.
-- **The profile is derived from the include entry**, so one install serves
-  any profile — each profile's process watches its own manifest.
-
-## Logs
-
-```
-~/.dsh/logs/dsh-hot-installer/dsh-hot-installer.log
-```
-
-Each hot install is recorded (`hot-applied <pkg> (N patch entries)`); a
-bundle that needs a restart is recorded with the reason.
-
-## Requirements
-
-- DeepSeek Harness profile surface with the HMR service (long-lived surfaces
-  such as `dsh web`). The plugin activates immediately at boot — it never
-  pends on a missing service, so it cannot fail boot — and starts watching
-  once HMR appears; surfaces without HMR simply never start it.
-- Node >= 20.
-
-## Verify
-
-The repository ships a throwaway test bundle:
-
-```bash
-dsh plugin --profile web add file:./examples/dsh-hot-test-bundle
-# no restart! the test bundle mounts immediately and logs
-# ~/.dsh/logs/dsh-hot-test-bundle/dsh-hot-test-bundle.log
-dsh plugin --profile web remove dsh-hot-test-bundle
-```
+Hot-installed rows live in memory only: if you then **hand-edit** the profile's `cordis.patch.yml`, HMR recomposes the tree from the startup snapshot and the hot-installed rows drop out (a restart brings them back, since the manifest still lists those packages). Likewise the official Settings → plugin list reflects the startup snapshot, so hot-installed packages only appear there after a restart. Both are by design: this plugin only manages the bundle list and never fights the patch layer.
 
 ## Development
 
-```bash
-npm install          # js-yaml (for patch parsing)
-node --test test/    # unit tests for the pure helpers
+```sh
+npm install && node --test test/   # pure-helper unit tests (diff / parse / dedupe / remove)
 ```
+
+The repo ships a throwaway test bundle (`examples/dsh-hot-test-bundle`, writes an activation log line) for a no-restart install/uninstall drill. Requires Node >= 20 and a long-lived HMR surface (e.g. `dsh web`); one-shot CLI surfaces boot normally but never start the watcher.
 
 ## License
 

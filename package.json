@@ -1,7 +1,7 @@
 {
   "name": "dsh-hot-installer",
-  "version": "0.1.1",
-  "description": "Hot-install profile bundles for DeepSeek Harness: install once, restart once, and every later `dsh plugin add <pkg>` takes effect live — no more restarts for new plugins.",
+  "version": "0.2.0",
+  "description": "Hot-install and hot-remove profile bundles for DeepSeek Harness: install once, restart once, and every later `dsh plugin add` / `dsh plugin remove` takes effect live — no restarts, no stale rows, no page errors.",
   "keywords": [
     "deepseek-harness",
     "dsh",

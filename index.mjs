@@ -1,25 +1,33 @@
-// dsh-hot-installer — hot-install profile bundles without restarting dsh.
+// dsh-hot-installer — hot-install and hot-remove profile bundles without
+// restarting dsh.
 //
 // Problem: `dsh plugin --profile <name> add <pkg>` installs a bundle, but the
-// new bundle only mounts after restarting dsh — dsh.profile.bundles is
-// composed at boot and nothing watches it (HMR only watches the user patch
-// files). Installing packages is the one cold path in an otherwise hot tree.
+// bundle only mounts after restarting dsh — dsh.profile.bundles is composed
+// at boot and nothing watches it (HMR only watches the user patch files).
+// Installing and removing packages are the cold paths in an otherwise hot
+// tree, and a removed bundle whose row stays mounted breaks the next page
+// load (the client bundle 404s).
 //
 // Fix: this plugin watches the profile manifest (<profile>/package.json)
 // through the same HMR config registration app-boot uses for cordis.patch.yml
 // (`hmr.registerConfig`). When a NEW bundle name appears in
 // dsh.profile.bundles, it resolves the installed package, reads its
 // dsh.bundle.patch (cordis.patch.yml), and appends the parsed patch list to
-// the root include entry's config.patches — the exact hot-application entry
-// watchUserPatches drives. The loader diff then activates the new rows live
-// (PoC measured ~8 ms; no restart, no HMR wait).
+// the root include entry's config.patches — the loader diff activates the
+// rows live (PoC measured ~8 ms). When a bundle name DISAPPEARS, the
+// recorded patch entries are stripped out of the same config.patches and the
+// loader diff unloads the rows — so `dsh plugin remove` takes effect live
+// too, and the page never 404s on a vanished client bundle.
 //
-// v1: add-only. Removals (`dsh plugin remove`) keep their rows mounted until
-// restart — removal needs a bundle→row mapping and is v2 work.
+// The bundle→rows mapping is built at startup for every bundle already in
+// the manifest (boot-time rows are removable too) and extended on every hot
+// install. It lives in memory only: a restart rebuilds it from the manifest,
+// and a restart was always the fallback for anything this plugin cannot
+// reconcile.
 //
 // Mounting: install once as a profile bundle (see package.json
 // dsh.bundle.patch and cordis.patch.yml), restart once. From then on, every
-// `dsh plugin add <pkg>` is hot.
+// `dsh plugin add` / `dsh plugin remove` is hot.
 
 import { readFile, appendFile, mkdir } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
@@ -160,6 +168,39 @@ export function dedupeInserts(patches, existingIds) {
   return result
 }
 
+/**
+ * Deep equality for JSON-safe loader values (plain objects/arrays/scalars and
+ * the `{ __jsExpr }` wrapper the entry-list YAML dialect produces).
+ */
+export function deepEqual(a, b) {
+  if (a === b) return true
+  if (typeof a !== 'object' || a === null || typeof b !== 'object' || b === null) return false
+  const aKeys = Object.keys(a)
+  const bKeys = Object.keys(b)
+  if (aKeys.length !== bKeys.length) return false
+  for (const key of aKeys) {
+    if (!Object.prototype.hasOwnProperty.call(b, key)) return false
+    if (!deepEqual(a[key], b[key])) return false
+  }
+  return true
+}
+
+/**
+ * Remove one bundle's contributed patch entries from the include's patch
+ * list: each recorded entry is matched by deep equality and removed once
+ * (later entries are matched against the shrinking list, so a duplicate of
+ * an earlier entry is never double-removed). Entries not found are left for
+ * the caller to diagnose.
+ */
+export function removePatches(patches, bundlePatches) {
+  const result = [...patches]
+  for (const target of bundlePatches) {
+    const index = result.findIndex((entry) => deepEqual(entry, target))
+    if (index !== -1) result.splice(index, 1)
+  }
+  return result
+}
+
 // ---------------------------------------------------------------------------
 // runtime
 // ---------------------------------------------------------------------------
@@ -192,7 +233,11 @@ function existingRowIds(loader, includeEntry) {
  * the new rows — the same path boot uses, so a restart composes identically.
  * @returns the number of patch entries applied (0 when all rows were already present).
  */
-async function hotInstall(ctx, includeEntry, profileDir, packageName) {
+/**
+ * Read and parse one installed bundle's patch list (dsh.bundle.patch).
+ * @returns the parsed patch list (may be empty).
+ */
+async function readBundlePatch(profileDir, packageName) {
   const packageDir = resolveBundleDir(profileDir, packageName)
   if (packageDir === undefined) {
     throw new Error(`cannot resolve ${packageName} from ${profileDir} — run 'dsh plugin --profile ${basename(profileDir)} install' if its dependency is not installed`)
@@ -203,10 +248,23 @@ async function hotInstall(ctx, includeEntry, profileDir, packageName) {
     throw new Error(`${packageName} declares no dsh.bundle in its package.json`)
   }
   const patchPath = join(packageDir, declared)
-  const patches = parsePatchList(await readFile(patchPath, 'utf8'), patchPath)
-  if (patches.length === 0) return 0
+  return parsePatchList(await readFile(patchPath, 'utf8'), patchPath)
+}
+
+/**
+ * Hot-install one newly added bundle: resolve its package dir, read its
+ * dsh.bundle.patch, dedupe its insert rows against the live tree, and append
+ * the patch list to the root include entry's config.patches. The include's
+ * own patch application re-composes the tree and the loader diff activates
+ * the new rows — the same path boot uses, so a restart composes identically.
+ * @returns the patch entries actually appended (empty when all rows were
+ * already present); these are the exact values hotRemove must remove again.
+ */
+async function hotInstall(ctx, includeEntry, profileDir, packageName) {
+  const patches = await readBundlePatch(profileDir, packageName)
+  if (patches.length === 0) return []
   const fresh = dedupeInserts(patches, existingRowIds(ctx.get('loader'), includeEntry))
-  if (fresh.length === 0) return 0
+  if (fresh.length === 0) return []
   const { patches: previous, ...includeConfig } = includeEntry.options.config
   await includeEntry.update({
     config: {
@@ -214,7 +272,23 @@ async function hotInstall(ctx, includeEntry, profileDir, packageName) {
       patches: [...(previous ?? []), ...fresh],
     },
   })
-  return fresh.length
+  return fresh
+}
+
+/**
+ * Hot-remove one bundle: strip its recorded patch entries (the exact values
+ * hotInstall appended, or the boot-time parse for bundles mounted at boot)
+ * out of the root include entry's config.patches. The include re-composes
+ * and the loader diff unloads the rows — the mirror image of hotInstall.
+ */
+async function hotRemove(ctx, includeEntry, packageName, bundlePatches) {
+  const { patches: previous, ...includeConfig } = includeEntry.options.config
+  const current = previous ?? []
+  const next = removePatches(current, bundlePatches)
+  if (next.length === current.length) {
+    throw new Error('no matching rows found in the live include config')
+  }
+  await includeEntry.update({ config: { ...includeConfig, patches: next } })
 }
 
 export async function apply(ctx) {
@@ -239,6 +313,20 @@ export async function apply(ctx) {
     snapshot = readBundles(JSON.parse(await readFile(manifestPath, 'utf8')))
   } catch (error) {
     log(ctx, 'warn', `cannot read ${manifestPath} at startup (${String(error)}) — starting with an empty bundle snapshot`)
+  }
+
+  // bundle name -> the patch entries it contributed to the include config.
+  // Built for every bundle present at startup (boot-time rows must be
+  // removable too) and extended on every hot install. This mapping is the
+  // only durable knowledge that lets a removal know WHICH rows to strip.
+  const bundlePatches = new Map()
+  for (const packageName of snapshot) {
+    try {
+      const patches = await readBundlePatch(profileDir, packageName)
+      if (patches.length > 0) bundlePatches.set(packageName, patches)
+    } catch (error) {
+      log(ctx, 'warn', `cannot index ${packageName} for hot removal (${String(error)})`)
+    }
   }
 
   // Serialize every refresh (HMR invokes the callback serially, and retries
@@ -272,11 +360,31 @@ export async function apply(ctx) {
     }
     const current = readBundles(manifest)
     const added = diffBundles(snapshot, current)
-    if (added.length === 0) {
+    const removed = diffBundles(current, snapshot)
+    if (added.length === 0 && removed.length === 0) {
       snapshot = current
       return
     }
-    log(ctx, 'info', `manifest change: new bundle(s) ${added.join(', ')}`)
+    if (removed.length > 0) {
+      log(ctx, 'info', `manifest change: removed bundle(s) ${removed.join(', ')}`)
+      for (const packageName of removed) {
+        snapshot = snapshot.filter((name) => name !== packageName)
+        const patches = bundlePatches.get(packageName)
+        if (patches === undefined || patches.length === 0) {
+          bundlePatches.delete(packageName)
+          log(ctx, 'warn', `${packageName}: no recorded rows to remove — already clean`)
+          continue
+        }
+        try {
+          await hotRemove(ctx, includeEntry, packageName, patches)
+          bundlePatches.delete(packageName)
+          log(ctx, 'info', `hot-removed ${packageName} (${patches.length} patch entr${patches.length === 1 ? 'y' : 'ies'})`)
+        } catch (error) {
+          // Keep the mapping: a later manifest write retries the removal.
+          log(ctx, 'error', `restart required for ${packageName}: ${String(error)}`)
+        }
+      }
+    }
     for (const packageName of added) {
       // Recorded either way: a successful apply must not re-run, and a failed
       // one is logged as restart-required (retrying every write would only
@@ -284,8 +392,12 @@ export async function apply(ctx) {
       snapshot = [...snapshot, packageName]
       try {
         const applied = await hotInstall(ctx, includeEntry, profileDir, packageName)
-        if (applied > 0) log(ctx, 'info', `hot-applied ${packageName} (${applied} patch entr${applied === 1 ? 'y' : 'ies'})`)
-        else log(ctx, 'info', `${packageName}: all rows already present — nothing to apply`)
+        if (applied.length > 0) {
+          bundlePatches.set(packageName, applied)
+          log(ctx, 'info', `hot-applied ${packageName} (${applied.length} patch entr${applied.length === 1 ? 'y' : 'ies'})`)
+        } else {
+          log(ctx, 'info', `${packageName}: all rows already present — nothing to apply`)
+        }
       } catch (error) {
         log(ctx, 'error', `restart required for ${packageName}: ${String(error)}`)
       }
@@ -310,6 +422,6 @@ export async function apply(ctx) {
       }
       return
     }
-    log(ctx, 'info', `active — watching ${manifestPath} for new profile bundles (hot install enabled)`)
+    log(ctx, 'info', `active — watching ${manifestPath} for new/removed profile bundles (hot install/remove enabled)`)
   })
 }
