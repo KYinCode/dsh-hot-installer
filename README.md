@@ -1,8 +1,8 @@
 # dsh-hot-installer
 
-**给 DeepSeek Harness 装上之后，`dsh plugin add` / `remove` / `update` 都不再需要重启。** 装一次、重启一次，之后这个插件替你监听 profile 的插件清单：新装的包当场挂载、卸掉的包当场卸载、升级的包当场重载；就算你手动编辑了补丁文件，它也会把被冲掉的热装行自动补回来。
+[中文](README.md) | [English](README.en.md)
 
-中文 | [English](README.en.md)
+**给 DeepSeek Harness 装上之后，`dsh plugin add` / `remove` / `update` 都不再需要重启。** 装一次、重启一次，之后这个插件替你监听 profile 的插件清单：新装的包当场挂载、卸掉的包当场卸载、升级的包当场重载；就算你手动编辑了补丁文件，它也会把被冲掉的热装行自动补回来。
 
 ## 这是什么
 
