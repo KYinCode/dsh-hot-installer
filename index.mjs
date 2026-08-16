@@ -355,8 +355,8 @@ async function readBundlePatch(profileDir, packageName) {
  * @returns the patch entries actually appended (empty when all rows were
  * already present); these are the exact values hotRemove must remove again.
  */
-async function hotInstall(ctx, includeEntry, profileDir, packageName) {
-  const patches = await readBundlePatch(profileDir, packageName)
+async function hotInstall(ctx, includeEntry, profileDir, packageName, preParsedPatches) {
+  const patches = preParsedPatches ?? (await readBundlePatch(profileDir, packageName))
   if (patches.length === 0) return []
   const fresh = dedupeInserts(patches, existingRowIds(ctx.get('loader'), includeEntry))
   if (fresh.length === 0) return []
@@ -481,12 +481,17 @@ export async function apply(ctx) {
 
   /** Version-spec change: drop the row and re-add it so the loader re-imports the new module. */
   async function hotReload(packageName, from, to) {
+    // Pre-flight: parse the NEW package's patch list BEFORE touching the live
+    // row. If the new patch cannot be resolved or parsed, the old row stays
+    // mounted untouched and the caller logs restart-required — the failure
+    // must never cost the user a working plugin.
+    const nextPatches = await readBundlePatch(profileDir, packageName)
     const patches = bundlePatches.get(packageName)
     if (patches !== undefined && patches.length > 0) {
       await hotRemove(ctx, includeEntry, packageName, patches)
       bundlePatches.delete(packageName)
     }
-    const applied = await hotInstall(ctx, includeEntry, profileDir, packageName)
+    const applied = await hotInstall(ctx, includeEntry, profileDir, packageName, nextPatches)
     if (applied.length > 0) {
       bundlePatches.set(packageName, applied)
       log(ctx, 'info', `hot-reloaded ${packageName} (${from} -> ${to}, ${applied.length} patch entr${applied.length === 1 ? 'y' : 'ies'})`)

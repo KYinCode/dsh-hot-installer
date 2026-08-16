@@ -35,7 +35,7 @@ On every manifest change (`dsh plugin add` writes twice — pnpm's dependency pa
 
 ## Known limits
 
-The official Settings → plugin list reflects the startup snapshot, so hot-installed packages only appear there after a restart (a display-layer quirk, no functional impact). An upgrade reload happens after the new package is on disk and briefly unmounts the row; in the worst case, if the new code itself fails to load, the row stays absent with a `restart required` log entry and a restart restores it from the manifest.
+An upgrade reload pre-flights the new version (parses its patch declaration) before touching the live row; if that parse fails the old row stays mounted untouched and only a `restart required` entry is logged. Only when the new code itself fails to load (import/apply failure) does the row stay absent with a `restart required` log entry, restored from the manifest on the next restart. The official Settings → plugin list reads the live loader tree, so hot-installed packages are visible immediately.
 
 ## Development
 
