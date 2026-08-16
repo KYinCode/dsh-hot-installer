@@ -52,8 +52,19 @@ bundle 的 `cordis.patch.yml` → 把其行注入 root include entry → 热生�
 
 - [x] 装一次热安装器 → 重启 → 用 `dsh plugin add` 装一个测试包 → 观察免重启生效
   （2026-08-16 实测：经用户补丁层热挂载插件本体后，`dsh plugin add dsh-hot-test-bundle`
-  的插件行 **13ms 内激活**并写入日志，全程无重启；profile 已装 `dsh-hot-installer@^0.1.0`，
-  下次重启后正式生效）
+  的插件行 **13ms 内激活**并写入日志，全程无重启）
 - [x] 双语 README + 发布 npm + 推 GitHub（仓库名建议 `dsh-hot-installer`）
-  - npm：`dsh-hot-installer@0.1.0`（2026-08-16 发布）
+  - npm：`dsh-hot-installer@0.1.1`（2026-08-16 发布；0.1.0 → 0.1.1 修复见下）
   - GitHub：https://github.com/KYinCode/dsh-hot-installer
+
+## 0.1.1 修复记录（2026-08-16）
+
+- **症状**：0.1.0 用 `inject: ['hmr']` 声明依赖，但 HMR 服务在 boot **之后**才由
+  profile-boot 创建 → entry 在 boot 时 pending → `assertEntriesActivated` fail-loud，
+  `dsh web` 启动失败（`1 entry did not activate`）。
+- **修复**：去掉插件级 inject（`inject: []`），apply 立即激活；用
+  `ctx.inject(['hmr'], ...)` 起一个**子 fiber** 等 HMR 出现后再
+  `hmr.registerConfig`（Cordis 的 `ctx.inject(inject, callback)` 不会阻塞本 entry）。
+  无 HMR 的面永远不会启动监听，boot 不可能失败。
+- **验证**：`dsh --profile hotboot`（临时 scratch profile，base + hot-installer）
+  实测 boot 成功、插件日志出现 `active`；web profile 已重装 `dsh-hot-installer@^0.1.1`。

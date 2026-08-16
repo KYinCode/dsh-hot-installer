@@ -75,8 +75,9 @@ bundle that needs a restart is recorded with the reason.
 ## Requirements
 
 - DeepSeek Harness profile surface with the HMR service (long-lived surfaces
-  such as `dsh web`; the plugin waits for HMR, so one-shot surfaces simply
-  never run it).
+  such as `dsh web`). The plugin activates immediately at boot — it never
+  pends on a missing service, so it cannot fail boot — and starts watching
+  once HMR appears; surfaces without HMR simply never start it.
 - Node >= 20.
 
 ## Verify

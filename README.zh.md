@@ -66,8 +66,9 @@ dsh-hot-installer（作为 profile bundle 挂载）
 
 ## 要求
 
-- 带 HMR 服务的 DeepSeek Harness profile 常驻面（如 `dsh web`；插件会等 HMR，
-  一次性命令行面永远不会激活它）。
+- 带 HMR 服务的 DeepSeek Harness profile 常驻面（如 `dsh web`）。插件在 boot
+  时立即激活——不会因缺服务而挂起，所以不可能导致启动失败——HMR 出现后才开始
+  监听；没有 HMR 的面永远不会启动它。
 - Node >= 20。
 
 ## 验证

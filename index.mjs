@@ -29,10 +29,11 @@ import { fileURLToPath } from 'node:url'
 import * as yaml from 'js-yaml'
 
 export const name = 'dsh-hot-installer'
-// The HMR service appears only after boot on long-lived surfaces (profile-boot
-// creates it post-boot). Waiting on it guarantees the loader is settled and
-// the root include entry exists when apply runs.
-export const inject = ['hmr']
+// Deliberately NO plugin-level inject: the entry must activate at boot even
+// though the HMR service is only created after boot on long-lived surfaces —
+// a pending entry fails boot loud (assertEntriesActivated). The watcher setup
+// instead waits for HMR in a child fiber (see ctx.inject in apply).
+export const inject = []
 
 const DSH_HOME = process.env.DSH_HOME || join(process.env.USERPROFILE || '', '.dsh')
 // Plugin-scoped log: logs/ root holds directories per plugin, not loose files.
@@ -291,19 +292,24 @@ export async function apply(ctx) {
     }
   }
 
-  try {
-    const disposer = await ctx.hmr.registerConfig(manifestPath, () => enqueueRefresh())
-    // Close the exact-path watcher when this fiber dies (a stale registration
-    // would keep invoking a dead closure after a tree reload).
-    ctx.effect(() => () => disposer())
-  } catch (error) {
-    if (error && typeof error.message === 'string' && error.message.startsWith('config path already registered')) {
-      log(ctx, 'warn', `${manifestPath} is already watched by a previous instance — hot install unavailable in this session`)
-    } else {
-      log(ctx, 'error', `failed to watch ${manifestPath}: ${String(error)} — hot install disabled (restart required)`)
+  // The HMR service is created after boot (profile-boot mounts it post-boot
+  // on long-lived surfaces). Wait for it in a child fiber instead of a
+  // plugin-level inject: this entry must activate immediately or boot fails
+  // loud, and a surface without HMR simply never starts the watcher.
+  ctx.inject(['hmr'], async function startHotInstall(hmrCtx) {
+    try {
+      const disposer = await hmrCtx.hmr.registerConfig(manifestPath, () => enqueueRefresh())
+      // Close the exact-path watcher when this fiber dies (a stale registration
+      // would keep invoking a dead closure after a tree reload).
+      hmrCtx.effect(() => () => disposer())
+    } catch (error) {
+      if (error && typeof error.message === 'string' && error.message.startsWith('config path already registered')) {
+        log(ctx, 'warn', `${manifestPath} is already watched by a previous instance — hot install unavailable in this session`)
+      } else {
+        log(ctx, 'error', `failed to watch ${manifestPath}: ${String(error)} — hot install disabled (restart required)`)
+      }
+      return
     }
-    return
-  }
-
-  log(ctx, 'info', `active — watching ${manifestPath} for new profile bundles (hot install enabled)`)
+    log(ctx, 'info', `active — watching ${manifestPath} for new profile bundles (hot install enabled)`)
+  })
 }
