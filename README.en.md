@@ -35,7 +35,7 @@ On every manifest change (`dsh plugin add` writes twice — pnpm's dependency pa
 
 ## Known limits
 
-An upgrade reload pre-flights the new version (parses its patch declaration) before touching the live row; if that parse fails the old row stays mounted untouched and only a `restart required` entry is logged. Only when the new code itself fails to load (import/apply failure) does the row stay absent with a `restart required` log entry, restored from the manifest on the next restart. The official Settings → plugin list reads the live loader tree, so hot-installed packages are visible immediately.
+Upgrade reloads have a full protection chain: the new version is pre-flighted (its patch declaration parsed) before the live row is touched — a parse failure keeps the old row mounted and only logs `restart required`. If the new code itself fails to load (import/apply failure), the dependency is automatically reinstalled at its previous spec via pnpm and the row remounted (`update failed ... rolling back` / `rolled back` logs), so the plugin keeps working on the old code almost unnoticed; only when the rollback itself fails (e.g. the old version was unpublished) is a restart needed. The official Settings → plugin list reads the live loader tree, so hot-installed packages are visible immediately.
 
 ## Development
 

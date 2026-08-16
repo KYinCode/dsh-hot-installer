@@ -35,7 +35,7 @@ dsh plugin --profile web add some-plugin@latest   # 立即升级重载，不用�
 
 ## 已知边界
 
-更新热重载会先预检新版本（解析它的补丁声明），解析失败时旧行保持不动、只记录 `restart required`；仅当新版代码本身无法被 loader 加载（import/apply 失败）时，该行会保持缺席并记录 `restart required`，重启后按清单正常恢复。官方"设置 → 插件列表"读取的是运行时插件树，热装的包即时可见。
+更新热重载有完整防护链：先预检新版本（解析它的补丁声明），解析失败时旧行保持不动、只记录 `restart required`；如果新代码本身无法被 loader 加载（import/apply 失败），会自动用 pnpm 把依赖装回旧版本并重新挂载（日志 `update failed ... rolling back` / `rolled back`），插件几乎无感地继续用旧版——只有回滚本身也失败（比如旧版本已从 registry 下架）才需要重启。官方"设置 → 插件列表"读取的是运行时插件树，热装的包即时可见。
 
 ## 开发与验证
 

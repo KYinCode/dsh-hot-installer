@@ -40,6 +40,7 @@
 
 import { readFile, appendFile, mkdir } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
+import { spawnSync } from 'node:child_process'
 import { createRequire } from 'node:module'
 import { basename, dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -479,6 +480,25 @@ export async function apply(ctx) {
     log(ctx, 'info', `replayed ${[...toReplay.values()].reduce((n, e) => n + e.length, 0)} patch entr${[...toReplay.values()].reduce((n, e) => n + e.length, 0) === 1 ? 'y' : 'ies'} lost to a patch-layer refresh`)
   }
 
+  /**
+   * Reinstall a bundle at its previous spec via pnpm. Used to roll back an
+   * update whose new code failed to load: the old files are gone from
+   * node_modules (pnpm replaced them), so only a real reinstall restores
+   * them. The manifest write this produces re-triggers the normal update
+   * path (to -> from), which reloads the row from the restored files.
+   * @returns true when pnpm exited 0.
+   */
+  function rollbackDependency(packageName, spec) {
+    const pnpm = process.platform === 'win32' ? 'pnpm.cmd' : 'pnpm'
+    const result = spawnSync(pnpm, ['add', `${packageName}@${spec}`], {
+      cwd: profileDir,
+      stdio: 'ignore',
+      shell: process.platform === 'win32',
+      timeout: 120000,
+    })
+    return result.status === 0
+  }
+
   /** Version-spec change: drop the row and re-add it so the loader re-imports the new module. */
   async function hotReload(packageName, from, to) {
     // Pre-flight: parse the NEW package's patch list BEFORE touching the live
@@ -540,13 +560,24 @@ export async function apply(ctx) {
       }
     }
     for (const update of updated) {
-      // Recorded either way; a failed reload keeps the old row if it still
-      // exists (removal is attempted first, so failure means re-add failed —
-      // the row then comes back at the next restart from the manifest).
+      // A failed reload rolls the dependency back to its previous spec so the
+      // plugin keeps working on the old code: the new files are already on
+      // disk (pnpm replaced them), so only a real reinstall restores the old
+      // ones. The rollback's own manifest write re-enters the update path
+      // (to -> from), which reloads the row from the restored files.
       try {
         await hotReload(update.name, update.from, update.to)
       } catch (error) {
-        log(ctx, 'error', `restart required for ${update.name} (update ${update.from} -> ${update.to}): ${String(error)}`)
+        log(ctx, 'error', `update failed for ${update.name} (${update.from} -> ${update.to}): ${String(error)} — rolling back to ${update.from}`)
+        try {
+          if (rollbackDependency(update.name, update.from)) {
+            log(ctx, 'info', `rolled back ${update.name} to ${update.from} — reloading from the manifest`)
+          } else {
+            log(ctx, 'error', `restart required for ${update.name}: rollback to ${update.from} failed (pnpm exited non-zero)`)
+          }
+        } catch (rollbackError) {
+          log(ctx, 'error', `restart required for ${update.name}: rollback failed (${String(rollbackError)})`)
+        }
       }
     }
     for (const packageName of added) {
