@@ -50,5 +50,10 @@ bundle 的 `cordis.patch.yml` → 把其行注入 root include entry → 热生�
 
 ## 收尾检查
 
-- [ ] 装一次热安装器 → 重启 → 用 `dsh plugin add` 装一个测试包 → 观察免重启生效
-- [ ] 双语 README + 发布 npm + 推 GitHub（仓库名建议 `dsh-hot-installer`）
+- [x] 装一次热安装器 → 重启 → 用 `dsh plugin add` 装一个测试包 → 观察免重启生效
+  （2026-08-16 实测：经用户补丁层热挂载插件本体后，`dsh plugin add dsh-hot-test-bundle`
+  的插件行 **13ms 内激活**并写入日志，全程无重启；profile 已装 `dsh-hot-installer@^0.1.0`，
+  下次重启后正式生效）
+- [x] 双语 README + 发布 npm + 推 GitHub（仓库名建议 `dsh-hot-installer`）
+  - npm：`dsh-hot-installer@0.1.0`（2026-08-16 发布）
+  - GitHub：https://github.com/KYinCode/dsh-hot-installer
