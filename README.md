@@ -30,7 +30,7 @@ On every manifest change (`dsh plugin add` writes twice — pnpm's dependency pa
 
 ## Known limits
 
-Hot-installed rows live in memory only: if you then **hand-edit** the profile's `cordis.patch.yml`, HMR recomposes the tree from the startup snapshot and the hot-installed rows drop out (a restart brings them back, since the manifest still lists those packages). Likewise the official Settings → plugin list reflects the startup snapshot, so hot-installed packages only appear there after a restart. Both are by design: this plugin only manages the bundle list and never fights the patch layer.
+Hot-installed rows live in memory only: if you then **hand-edit** the profile's `cordis.patch.yml`, HMR recomposes the tree from the startup snapshot and the hot-installed rows drop out (a restart brings them back, since the manifest still lists those packages). Likewise the official Settings → plugin list reflects the startup snapshot, so hot-installed packages only appear there after a restart. **Version updates (`dsh plugin add pkg@latest`) do not change the plugin row, so this plugin will not reload it**: after a page refresh the browser runs the new client code while the host half in the process stays on the old module (ESM cache) — in the worst case the new client calls APIs the old host does not have, so a restart after updating is recommended. All of these are by design: this plugin only manages the bundle list, never versions or the patch layer.
 
 ## Development
 
