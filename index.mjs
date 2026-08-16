@@ -38,7 +38,7 @@
 // dsh.bundle.patch and cordis.patch.yml), restart once. From then on, every
 // `dsh plugin add` / `dsh plugin remove` / `dsh plugin update` is hot.
 
-import { readFile, appendFile, mkdir } from 'node:fs/promises'
+import { readFile, writeFile, appendFile, mkdir } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { createRequire } from 'node:module'
@@ -499,6 +499,33 @@ export async function apply(ctx) {
     return result.status === 0
   }
 
+  /**
+   * Last-resort protection when an update fails AND the rollback fails: the
+   * manifest still points at the broken version, so the next boot would fail
+   * loud loading it. Removing the bundle from the profile's bundle list keeps
+   * dsh bootable (the package stays in dependencies); the plugin is simply
+   * not mounted until the user re-adds it at a working spec. The manifest
+   * write re-enters the normal change path, which unloads the row if it is
+   * still mounted.
+   */
+  async function emergencyUnmount(packageName, from) {
+    let manifest
+    try {
+      manifest = JSON.parse(await readFile(manifestPath, 'utf8'))
+    } catch (error) {
+      log(ctx, 'error', `restart required for ${packageName}: cannot read ${manifestPath} to unload it (${String(error)})`)
+      return
+    }
+    const bundles = manifest.dsh && manifest.dsh.profile && manifest.dsh.profile.bundles
+    if (!Array.isArray(bundles) || !bundles.includes(packageName)) {
+      log(ctx, 'error', `restart required for ${packageName}: rollback to ${from} failed and it is not in the bundle list`)
+      return
+    }
+    manifest.dsh.profile.bundles = bundles.filter((name) => name !== packageName)
+    await writeFile(manifestPath, JSON.stringify(manifest, null, 2) + '\n', 'utf8')
+    log(ctx, 'error', `rollback to ${from} failed — removed ${packageName} from the profile bundle list so dsh stays bootable; re-add it with 'dsh plugin --profile ${basename(profileDir)} add ${packageName}@${from}' after fixing the registry issue`)
+  }
+
   /** Version-spec change: drop the row and re-add it so the loader re-imports the new module. */
   async function hotReload(packageName, from, to) {
     // Pre-flight: parse the NEW package's patch list BEFORE touching the live
@@ -570,13 +597,25 @@ export async function apply(ctx) {
       } catch (error) {
         log(ctx, 'error', `update failed for ${update.name} (${update.from} -> ${update.to}): ${String(error)} — rolling back to ${update.from}`)
         try {
-          if (rollbackDependency(update.name, update.from)) {
-            log(ctx, 'info', `rolled back ${update.name} to ${update.from} — reloading from the manifest`)
+          const ok = rollbackDependency(update.name, update.from)
+          if (!ok) {
+            await emergencyUnmount(update.name, update.from)
           } else {
-            log(ctx, 'error', `restart required for ${update.name}: rollback to ${update.from} failed (pnpm exited non-zero)`)
+            // pnpm can exit 0 without restoring a usable package (e.g. a
+            // dangling link: spec). Verify before declaring victory — an
+            // unverified "success" would re-trigger the update and loop
+            // forever between the two specs.
+            try {
+              await readBundlePatch(profileDir, update.name)
+              log(ctx, 'info', `rolled back ${update.name} to ${update.from} — reloading from the manifest`)
+            } catch (verifyError) {
+              log(ctx, 'error', `rollback of ${update.name} to ${update.from} did not restore a usable package (${String(verifyError)})`)
+              await emergencyUnmount(update.name, update.from)
+            }
           }
         } catch (rollbackError) {
           log(ctx, 'error', `restart required for ${update.name}: rollback failed (${String(rollbackError)})`)
+          await emergencyUnmount(update.name, update.from)
         }
       }
     }

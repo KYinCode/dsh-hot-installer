@@ -1,6 +1,6 @@
 {
   "name": "dsh-hot-installer",
-  "version": "0.4.0",
+  "version": "0.4.2",
   "description": "Hot-install, hot-remove, hot-update and replay-protected profile bundles for DeepSeek Harness: install once, restart once, and every later `dsh plugin add` / `remove` / `update` takes effect live — no restarts, no stale rows, no page errors, and hand-edits of cordis.patch.yml can no longer drop hot-installed rows.",
   "keywords": [
     "deepseek-harness",
