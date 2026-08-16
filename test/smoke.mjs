@@ -6,7 +6,7 @@ import assert from 'node:assert/strict'
 import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { readBundles, diffBundles, resolveBundleDir, parsePatchList, dedupeInserts, deepEqual, removePatches } from '../index.mjs'
+import { readBundles, diffBundles, resolveBundleDir, parsePatchList, dedupeInserts, deepEqual, removePatches, readDependencySpecs, diffSpecs, missingPatches, disabledIds, replayablePatches } from '../index.mjs'
 
 test('readBundles: reads the bundle layer, tolerates missing shapes', () => {
   assert.deepEqual(readBundles({ dsh: { profile: { bundles: ['a', 'b'] } } }), ['a', 'b'])
@@ -113,4 +113,62 @@ test('removePatches: strips a bundle\'s rows once each, leaves the rest', () => 
   assert.deepEqual(dup, [])
   // the input list is never mutated
   assert.equal(include.length, 4)
+})
+
+test('readDependencySpecs: reads the dependency map, tolerates missing shapes', () => {
+  assert.deepEqual(readDependencySpecs({ dependencies: { a: '^1.0.0', b: '0.2.0' } }), { a: '^1.0.0', b: '0.2.0' })
+  assert.deepEqual(readDependencySpecs({}), {})
+  assert.deepEqual(readDependencySpecs(undefined), {})
+})
+
+test('diffSpecs: reports only spec changes among shared names', () => {
+  const known = new Map([['a', '^1.0.0'], ['b', '0.2.0']])
+  const current = new Map([['a', '^1.0.0'], ['b', '0.3.0'], ['c', '^0.1.0']])
+  assert.deepEqual(diffSpecs(known, current), [{ name: 'b', from: '0.2.0', to: '0.3.0' }])
+  assert.deepEqual(diffSpecs(known, known), [])
+})
+
+test('missingPatches: finds recorded rows the live config lost', () => {
+  const mapping = new Map([
+    ['pkg-a', [{ insert: [{ id: 'a', name: 'pkg-a' }] }]],
+    ['pkg-b', [{ insert: [{ id: 'b', name: 'pkg-b' }] }]],
+  ])
+  // everything present -> nothing missing
+  assert.equal(missingPatches(mapping, [{ insert: [{ id: 'a', name: 'pkg-a' }] }, { insert: [{ id: 'b', name: 'pkg-b' }] }]).size, 0)
+  // config dropped pkg-a's row (a patch-layer rebuild) -> missing
+  const missing = missingPatches(mapping, [{ insert: [{ id: 'b', name: 'pkg-b' }] }])
+  assert.deepEqual([...missing.keys()], ['pkg-a'])
+  // empty config -> everything missing
+  assert.equal(missingPatches(mapping, []).size, 2)
+  assert.equal(missingPatches(mapping, undefined).size, 2)
+})
+
+test('replayablePatches: skips rows the patch file disables', () => {
+  const missing = new Map([
+    ['pkg-a', [{ insert: [{ id: 'a', name: 'pkg-a' }] }]],
+    ['pkg-b', [{ insert: [{ id: 'b1', name: 'pkg-b' }, { id: 'b2', name: 'pkg-b' }] }]],
+  ])
+  const disabled = new Set(['b2'])
+  const replay = replayablePatches(missing, disabled)
+  // pkg-a fully replayable; pkg-b only the non-disabled row
+  assert.deepEqual([...replay.keys()].sort(), ['pkg-a', 'pkg-b'])
+  assert.deepEqual(replay.get('pkg-b'), [{ insert: [{ id: 'b1', name: 'pkg-b' }] }])
+  // all rows disabled -> nothing replayable
+  assert.equal(replayablePatches(missing, new Set(['a', 'b1', 'b2'])).size, 0)
+  // id-targeted entries survive unless their target is disabled
+  const withConfig = new Map([['pkg-c', [{ id: 'c', config: { x: 1 } }]]])
+  assert.equal(replayablePatches(withConfig, new Set(['other'])).get('pkg-c').length, 1)
+  assert.equal(replayablePatches(withConfig, new Set(['c'])).size, 0)
+})
+
+test('disabledIds: reads explicit disabled markers from a parsed patch list', () => {
+  const patches = parsePatchList([
+    '- id: a',
+    '  disabled: true',
+    '- id: b',
+    '  disabled: !!js "process.env.X"',
+    '- id: c',
+  ].join('\n'), 'cordis.patch.yml')
+  const ids = disabledIds(patches)
+  assert.deepEqual([...ids], ['a'])
 })

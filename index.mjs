@@ -1,12 +1,12 @@
-// dsh-hot-installer — hot-install and hot-remove profile bundles without
-// restarting dsh.
+// dsh-hot-installer — hot-install, hot-remove, hot-reload and hot-replay
+// profile bundles without restarting dsh.
 //
 // Problem: `dsh plugin --profile <name> add <pkg>` installs a bundle, but the
 // bundle only mounts after restarting dsh — dsh.profile.bundles is composed
 // at boot and nothing watches it (HMR only watches the user patch files).
-// Installing and removing packages are the cold paths in an otherwise hot
-// tree, and a removed bundle whose row stays mounted breaks the next page
-// load (the client bundle 404s).
+// Installing, removing and updating packages are the cold paths in an
+// otherwise hot tree, and a removed bundle whose row stays mounted breaks
+// the next page load (the client bundle 404s).
 //
 // Fix: this plugin watches the profile manifest (<profile>/package.json)
 // through the same HMR config registration app-boot uses for cordis.patch.yml
@@ -16,18 +16,27 @@
 // the root include entry's config.patches — the loader diff activates the
 // rows live (PoC measured ~8 ms). When a bundle name DISAPPEARS, the
 // recorded patch entries are stripped out of the same config.patches and the
-// loader diff unloads the rows — so `dsh plugin remove` takes effect live
-// too, and the page never 404s on a vanished client bundle.
+// loader diff unloads the rows. When a bundle's DEPENDENCY SPEC changes
+// (`dsh plugin add pkg@latest`), the row is removed and re-added in one
+// step, which forces the loader to re-import the module and pick up the new
+// code (the ESM cache would otherwise serve the old module).
 //
-// The bundle→rows mapping is built at startup for every bundle already in
-// the manifest (boot-time rows are removable too) and extended on every hot
-// install. It lives in memory only: a restart rebuilds it from the manifest,
-// and a restart was always the fallback for anything this plugin cannot
-// reconcile.
+// Two protections cover the interaction with the user patch layer:
+// 1. REPLAY: boot's watchUserPatches recomposes the include from a static
+//    startup snapshot whenever cordis.patch.yml changes by hand — that
+//    rebuild silently drops hot-installed rows. A periodic reconciliation
+//    re-appends any recorded row the live config lost (skipping rows the
+//    patch file explicitly disables, so `dsh plugin toggle` style disabling
+//    is respected).
+// 2. The bundle→rows mapping is built at startup for every bundle already in
+//    the manifest (boot-time rows are removable too) and extended on every
+//    hot install. It lives in memory only: a restart rebuilds it from the
+//    manifest, and a restart was always the fallback for anything this
+//    plugin cannot reconcile.
 //
 // Mounting: install once as a profile bundle (see package.json
 // dsh.bundle.patch and cordis.patch.yml), restart once. From then on, every
-// `dsh plugin add` / `dsh plugin remove` is hot.
+// `dsh plugin add` / `dsh plugin remove` / `dsh plugin update` is hot.
 
 import { readFile, appendFile, mkdir } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
@@ -51,6 +60,9 @@ const LOG_FILE = join(DSH_HOME, 'logs', 'dsh-hot-installer', 'dsh-hot-installer.
 const SETTLE_MS = 300
 // A torn manifest read (mid-write) retries once after this delay.
 const RETRY_MS = 500
+// Periodic reconciliation interval: replays hot-installed rows the user
+// patch layer's HMR rebuild dropped (see the REPLAY note in the header).
+const REPLAY_INTERVAL_MS = 5000
 
 // ---------------------------------------------------------------------------
 // logging
@@ -106,6 +118,89 @@ export function readBundles(manifest) {
 /** Bundle names present in `current` but not in `snapshot`, in list order. */
 export function diffBundles(snapshot, current) {
   return current.filter((bundle) => !snapshot.includes(bundle))
+}
+
+/** The profile's dependency map (name → version spec), or {} when absent. */
+export function readDependencySpecs(manifest) {
+  const deps = manifest && manifest.dependencies
+  if (deps === null || typeof deps !== 'object' || Array.isArray(deps)) return {}
+  return { ...deps }
+}
+
+/**
+ * Bundles whose dependency spec changed between two snapshots.
+ * @param known - Map<name, spec> from the previous read.
+ * @param current - Map<name, spec> from the latest read.
+ * @returns [{ name, from, to }] for names present in both with different specs.
+ */
+export function diffSpecs(known, current) {
+  const updates = []
+  for (const [name, spec] of current) {
+    if (!known.has(name)) continue
+    const previous = known.get(name)
+    if (previous !== spec) updates.push({ name, from: previous, to: spec })
+  }
+  return updates
+}
+
+/**
+ * Which recorded bundle rows are missing from the live include config.
+ * @param bundlePatches - Map<name, patch entries the bundle contributed>.
+ * @param currentPatches - the include entry's current config.patches (or undefined).
+ * @returns Map<name, entries> for bundles whose entries are not all present.
+ */
+export function missingPatches(bundlePatches, currentPatches) {
+  const present = currentPatches ?? []
+  const missing = new Map()
+  for (const [name, entries] of bundlePatches) {
+    if (entries.length === 0) continue
+    const absent = entries.filter((entry) => !present.some((candidate) => deepEqual(candidate, entry)))
+    if (absent.length > 0) missing.set(name, absent)
+  }
+  return missing
+}
+
+/**
+ * Ids the profile patch file explicitly disables (`- id: X` + `disabled: true`).
+ * Used to respect intentional disabling during replay: a row the user (or a
+ * toggle tool) disabled in the patch layer must NOT be re-added.
+ */
+export function disabledIds(patches) {
+  const ids = new Set()
+  for (const patch of patches) {
+    if (patch && typeof patch.id === 'string' && patch.disabled === true) ids.add(patch.id)
+  }
+  return ids
+}
+
+/**
+ * Decide which missing rows to replay, honoring disabled markers:
+ * an insert row whose id is disabled in the patch file is skipped; a patch
+ * entry that only carries such rows is skipped entirely.
+ */
+export function replayablePatches(missing, disabled) {
+  const result = new Map()
+  for (const [name, entries] of missing) {
+    const kept = dedupeInsertRowsByDisabled(entries, disabled)
+    if (kept.length > 0) result.set(name, kept)
+  }
+  return result
+}
+
+function dedupeInsertRowsByDisabled(entries, disabled) {
+  const kept = []
+  for (const patch of entries) {
+    if (!Array.isArray(patch.insert)) {
+      // id-targeted entries (config overrides) carry no row of their own:
+      // replay them unless they target a disabled id.
+      if (!(patch && typeof patch.id === 'string' && disabled.has(patch.id))) kept.push(patch)
+      continue
+    }
+    const rows = patch.insert.filter((row) => !(row && typeof row.id === 'string' && disabled.has(row.id)))
+    if (rows.length === 0) continue
+    kept.push(rows.length === patch.insert.length ? patch : { ...patch, insert: rows })
+  }
+  return kept
 }
 
 /**
@@ -307,10 +402,14 @@ export async function apply(ctx) {
   }
   const manifestPath = join(profileDir, 'package.json')
 
-  // Snapshot of the bundle layer at mount time; only NEW bundle names apply.
-  let snapshot = []
+  // Snapshot of the bundle layer at mount time: bundle name -> dependency
+  // spec. Only NEW names apply; changed specs reload; vanished names remove.
+  let known = new Map()
   try {
-    snapshot = readBundles(JSON.parse(await readFile(manifestPath, 'utf8')))
+    const manifest = JSON.parse(await readFile(manifestPath, 'utf8'))
+    for (const bundle of readBundles(manifest)) {
+      known.set(bundle, readDependencySpecs(manifest)[bundle] ?? '')
+    }
   } catch (error) {
     log(ctx, 'warn', `cannot read ${manifestPath} at startup (${String(error)}) — starting with an empty bundle snapshot`)
   }
@@ -320,7 +419,7 @@ export async function apply(ctx) {
   // removable too) and extended on every hot install. This mapping is the
   // only durable knowledge that lets a removal know WHICH rows to strip.
   const bundlePatches = new Map()
-  for (const packageName of snapshot) {
+  for (const packageName of known.keys()) {
     try {
       const patches = await readBundlePatch(profileDir, packageName)
       if (patches.length > 0) bundlePatches.set(packageName, patches)
@@ -328,6 +427,7 @@ export async function apply(ctx) {
       log(ctx, 'warn', `cannot index ${packageName} for hot removal (${String(error)})`)
     }
   }
+  const patchPath = join(profileDir, 'cordis.patch.yml')
 
   // Serialize every refresh (HMR invokes the callback serially, and retries
   // join the same chain) so reads and entry updates never interleave.
@@ -348,6 +448,52 @@ export async function apply(ctx) {
       .catch((error) => log(ctx, 'error', `unexpected failure: ${String(error)}`))
     return chain
   }
+  const enqueueReconcile = () => {
+    chain = chain
+      .then(reconcileReplay)
+      .catch((error) => log(ctx, 'error', `unexpected replay failure: ${String(error)}`))
+    return chain
+  }
+
+  /** Re-add hot-installed rows the user patch layer's HMR rebuild dropped. */
+  async function reconcileReplay() {
+    if (bundlePatches.size === 0) return
+    const current = (includeEntry.options.config && includeEntry.options.config.patches) ?? []
+    const missing = missingPatches(bundlePatches, current)
+    if (missing.size === 0) return
+    // Respect intentional disabling: rows the patch file disables stay down.
+    let disabled = new Set()
+    try {
+      disabled = disabledIds(parsePatchList(await readFile(patchPath, 'utf8'), patchPath))
+    } catch { /* unreadable patch file: replay everything we have */ }
+    const toReplay = replayablePatches(missing, disabled)
+    if (toReplay.size === 0) return
+    const { patches: previous, ...includeConfig } = includeEntry.options.config
+    const next = [...(previous ?? [])]
+    for (const entries of toReplay.values()) {
+      const fresh = dedupeInserts(entries, existingRowIds(ctx.get('loader'), includeEntry))
+      next.push(...fresh)
+    }
+    if (next.length === (previous ?? []).length) return
+    await includeEntry.update({ config: { ...includeConfig, patches: next } })
+    log(ctx, 'info', `replayed ${[...toReplay.values()].reduce((n, e) => n + e.length, 0)} patch entr${[...toReplay.values()].reduce((n, e) => n + e.length, 0) === 1 ? 'y' : 'ies'} lost to a patch-layer refresh`)
+  }
+
+  /** Version-spec change: drop the row and re-add it so the loader re-imports the new module. */
+  async function hotReload(packageName, from, to) {
+    const patches = bundlePatches.get(packageName)
+    if (patches !== undefined && patches.length > 0) {
+      await hotRemove(ctx, includeEntry, packageName, patches)
+      bundlePatches.delete(packageName)
+    }
+    const applied = await hotInstall(ctx, includeEntry, profileDir, packageName)
+    if (applied.length > 0) {
+      bundlePatches.set(packageName, applied)
+      log(ctx, 'info', `hot-reloaded ${packageName} (${from} -> ${to}, ${applied.length} patch entr${applied.length === 1 ? 'y' : 'ies'})`)
+    } else {
+      log(ctx, 'info', `${packageName}: update applied, all rows already present`)
+    }
+  }
 
   async function handleChange() {
     let manifest
@@ -358,17 +504,20 @@ export async function apply(ctx) {
       scheduleRetry()
       return
     }
-    const current = readBundles(manifest)
-    const added = diffBundles(snapshot, current)
-    const removed = diffBundles(current, snapshot)
-    if (added.length === 0 && removed.length === 0) {
-      snapshot = current
+    const specs = readDependencySpecs(manifest)
+    const current = new Map()
+    for (const bundle of readBundles(manifest)) current.set(bundle, specs[bundle] ?? '')
+    const added = diffBundles([...known.keys()], [...current.keys()])
+    const removed = diffBundles([...current.keys()], [...known.keys()])
+    const updated = diffSpecs(known, current)
+    if (added.length === 0 && removed.length === 0 && updated.length === 0) {
+      known = current
       return
     }
     if (removed.length > 0) {
       log(ctx, 'info', `manifest change: removed bundle(s) ${removed.join(', ')}`)
       for (const packageName of removed) {
-        snapshot = snapshot.filter((name) => name !== packageName)
+        known.delete(packageName)
         const patches = bundlePatches.get(packageName)
         if (patches === undefined || patches.length === 0) {
           bundlePatches.delete(packageName)
@@ -385,11 +534,21 @@ export async function apply(ctx) {
         }
       }
     }
+    for (const update of updated) {
+      // Recorded either way; a failed reload keeps the old row if it still
+      // exists (removal is attempted first, so failure means re-add failed —
+      // the row then comes back at the next restart from the manifest).
+      try {
+        await hotReload(update.name, update.from, update.to)
+      } catch (error) {
+        log(ctx, 'error', `restart required for ${update.name} (update ${update.from} -> ${update.to}): ${String(error)}`)
+      }
+    }
     for (const packageName of added) {
       // Recorded either way: a successful apply must not re-run, and a failed
       // one is logged as restart-required (retrying every write would only
       // spam the log; boot composes it correctly).
-      snapshot = [...snapshot, packageName]
+      known.set(packageName, current.get(packageName) ?? '')
       try {
         const applied = await hotInstall(ctx, includeEntry, profileDir, packageName)
         if (applied.length > 0) {
@@ -402,6 +561,7 @@ export async function apply(ctx) {
         log(ctx, 'error', `restart required for ${packageName}: ${String(error)}`)
       }
     }
+    known = current
   }
 
   // The HMR service is created after boot (profile-boot mounts it post-boot
@@ -422,6 +582,10 @@ export async function apply(ctx) {
       }
       return
     }
-    log(ctx, 'info', `active — watching ${manifestPath} for new/removed profile bundles (hot install/remove enabled)`)
+    // Periodic reconciliation: the user patch layer's HMR rebuild can drop
+    // hot-installed rows; bring them back unless intentionally disabled.
+    const replayTimer = setInterval(() => void enqueueReconcile(), REPLAY_INTERVAL_MS)
+    ctx.effect(() => () => clearInterval(replayTimer))
+    log(ctx, 'info', `active — watching ${manifestPath} for new/removed/updated profile bundles (hot install/remove/reload enabled)`)
   })
 }
