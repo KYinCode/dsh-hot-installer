@@ -83,3 +83,20 @@ bundle 的 `cordis.patch.yml` → 把其行注入 root include entry → 热生�
 - **README 已重写**（段落式），边界写入"已知边界"节。
 - web profile 已装 `dsh-hot-installer@^0.2.0`（下次重启生效；运行中的 0.1.1
   继续工作到重启为止，无回归）。
+
+## 0.3.0 记录（2026-08-16）— V3：重放保护 + 更新热重载
+
+- **重放保护**：手动编辑 cordis.patch.yml → watchUserPatches 按 boot 快照重组
+  → 热装行被丢。新增 5s 轮询对账（`missingPatches` + `replayablePatches`），
+  缺失的记录行自动补回；补丁文件里显式 `disabled: true` 的行（插件开关工具
+  的禁用）被尊重、不补。
+- **更新热重载**：快照从"包名列表"升级为"包名→版本 spec"（`readDependencySpecs`
+  / `diffSpecs`）；spec 变化 → 摘旧行 → 重挂新行 → loader 重新 import 新模块
+  （绕 ESM 缓存），日志 `hot-reloaded X (from -> to, N patch entr...)`。
+- **验证**（scratch hot-test2，registry 0.3.0）：补丁文件编辑 → HMR 丢行 →
+  5s 内 `replayed 1 patch entry lost to a patch-layer refresh`（连续触发两次均
+  成功）；pomodoro 0.1.0 → 0.3.0 → `hot-reloaded dsh-pomodoro (0.1.0 -> 0.3.0)`。
+- **README**：中英互索引；边界节改写（只剩 inventory 快照展示层问题）。
+- **仓库 About**（gh 已设置）：双语 description + topics（dsh/deepseek-harness/
+  hot-reload/cordis 等）。
+- web profile 已装 `dsh-hot-installer@^0.3.0`（下次重启生效）。
