@@ -1,0 +1,5 @@
+# dsh-hot-test-bundle bundle patch: insert the plugin row when this package
+# is installed as a profile bundle.
+- insert:
+    - id: dsh-hot-test-bundle
+      name: 'dsh-hot-test-bundle'

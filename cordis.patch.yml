@@ -1,0 +1,6 @@
+# dsh-hot-installer bundle patch: insert the plugin row when this package is
+# installed as a profile bundle. The row's `name` is the package itself — the
+# loader resolves it from this bundle's own installation.
+- insert:
+    - id: dsh-hot-installer
+      name: 'dsh-hot-installer'

@@ -1,4 +1,4 @@
-# Upstream issue drafts (deepseek-ai/deepseek-harness)
+﻿# Upstream issue drafts (deepseek-ai/deepseek-harness)
 
 Issues observed while testing `dsh-project-mcp-bridge`, ready to file on
 https://github.com/deepseek-ai/deepseek-harness/issues.

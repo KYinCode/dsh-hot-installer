@@ -1,0 +1,23 @@
+{
+  "name": "dsh-hot-test-bundle",
+  "version": "0.1.0",
+  "description": "Throwaway test bundle for dsh-hot-installer: a plugin that writes an activation log line when mounted. Used to verify hot install (no restart) — not published.",
+  "license": "MIT",
+  "private": true,
+  "type": "module",
+  "main": "index.mjs",
+  "exports": {
+    ".": "./index.mjs",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.mjs",
+    "cordis.patch.yml"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}
