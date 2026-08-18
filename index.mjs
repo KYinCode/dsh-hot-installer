@@ -533,13 +533,22 @@ export async function apply(ctx) {
     if (toReplay.size === 0) return
     const { patches: previous, ...includeConfig } = includeEntry.options.config
     const next = [...(previous ?? [])]
-    for (const entries of toReplay.values()) {
+    // Count what is ACTUALLY appended, not what was flagged: rows recorded
+    // with `!!js` expressions do not deep-equal their evaluated live form, so
+    // they are flagged missing while still mounted — dedupeInserts skips them
+    // and the log must not count them as replayed (it previously printed the
+    // flag count, e.g. "replayed 3" for one real re-add).
+    let appended = 0
+    const names = []
+    for (const [bundle, entries] of toReplay) {
       const fresh = dedupeInserts(entries, existingRowIds(ctx.get('loader'), includeEntry))
+      appended += fresh.length
+      if (fresh.length > 0) names.push(bundle)
       next.push(...fresh)
     }
-    if (next.length === (previous ?? []).length) return
+    if (appended === 0) return
     await includeEntry.update({ config: { ...includeConfig, patches: next } })
-    log(ctx, 'info', `replayed ${[...toReplay.values()].reduce((n, e) => n + e.length, 0)} patch entr${[...toReplay.values()].reduce((n, e) => n + e.length, 0) === 1 ? 'y' : 'ies'} lost to a patch-layer refresh`)
+    log(ctx, 'info', `replayed ${appended} patch entr${appended === 1 ? 'y' : 'ies'} for ${names.join(', ')} lost to a patch-layer refresh`)
   }
 
   /**
