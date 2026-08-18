@@ -37,6 +37,8 @@ dsh plugin --profile web add some-plugin@latest   # 立即升级重载，不用�
 
 更新热重载有完整防护链：先预检新版本（解析它的补丁声明），解析失败时旧行保持不动、只记录 `restart required`；如果新代码本身无法被 loader 加载（import/apply 失败），会自动用 pnpm 把依赖装回旧版本并重新挂载（日志 `update failed ... rolling back` / `rolled back`），插件几乎无感地继续用旧版——只有回滚本身也失败（比如旧版本已从 registry 下架）才需要重启。卸载也一样诚实：如果卸载时发现对应行已经不在活配置里（比如补丁层重组刚把它冲掉），直接视为已卸载成功，不会误报 `restart required`。连热安装器自己都可以热更新（0.4.4 起）：自更新不会与自身的文件监听互相等待，`dsh plugin add dsh-hot-installer@latest` 同样免重启。官方"设置 → 插件列表"读取的是运行时插件树，热装的包即时可见。
 
+本地开发期常用的 `link:` 安装有一个已知角落：Windows 上 pnpm 用 junction 重解析点指到你的本地目录，Node 进程内会缓存该 junction 解析出的真实路径。因此**同一次 dsh 运行期间，把 link 目标切换到另一个目录再热升级，行会继续跑旧目录的旧代码**——日志照常打印 `hot-reloaded`（假成功），但新代码从未被加载，包自己的激活日志仍是旧版本。这不影响 npm 正式包（按版本换装每次都加载新代码）；也不影响在同一个 link 目录内原地改文件（但那本来就不会触发自动更新，因为没有 spec 变化）。应对：切换 link 到不同目录后重启一次 dsh，或干脆把本地包发布到 npm 用 `add pkg@新版本` 走正式热升级通道。
+
 ## 开发与验证
 
 ```sh
