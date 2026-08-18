@@ -171,3 +171,30 @@ bundle 的 `cordis.patch.yml` → 把其行注入 root include entry → 热生�
 - 诊断工具：`esm-cache-probe.mjs`（仓库根，复现同 URL 缓存行为）。
 - web profile 现装 `dsh-hot-installer@^0.4.6`，运行中即 0.4.6（自更新，
   全程未重启）。
+
+## 0.4.7 / 0.4.8 记录（2026-08-18）— 重放计数诚实 + 驱逐双前缀 + 回滚演练
+
+- **0.4.7 重放计数诚实化**：`!!js` 表达式的行被加载器求值后与原记录 deepEqual
+  不等，每次补丁层重组都被误判"缺失"，`dedupeInserts` 正确地跳过（行还在树
+  里），但日志按"判缺失数"统计（真实补 1 却报 `replayed 3`）。改为按**实际
+  追加数** + 列出包名：`replayed 1 patch entry for dsh-alive lost to a
+  patch-layer refresh`。
+- **0.4.8 驱逐双前缀**：Windows 上 pnpm 装的包缓存键保留 node_modules 软链
+  路径，而 `link:` junction 到外部目录的包缓存键是 junction 目标的 realpath
+  （解析跟随 junction）。只按包目录前缀驱逐会漏掉 junction 情况。改为同时匹配
+  `packageDir` 和 `realpathSync(packageDir)`。
+- **回滚演练（scratch hot-roll，0.4.8 实测）**：
+  - A 热装 good → `hot-applied` + bundle 激活日志 ✓
+  - B 升级到坏补丁 → 预检报错（带 YAML 定位）→ `rolling back` → `rolled back
+    ... reloading from the manifest` → `hot-reloaded` 回 good，bundle 日志再次
+    `ROLL v1.0.0 active` ✓（坏补丁绝不拆掉工作中的旧行）
+  - D 升级到含 `dsh.bundle` 但回滚目标（good 目录）被删 → 回滚 pnpm 退出 0 但
+    验证失败 → `emergencyUnmount`：从 bundles 摘掉 + 精确恢复命令 + watcher
+    顺手 `hot-removed`，profile 保持可启动、无死循环 ✓
+  - C（apply 抛错触发回滚）未拿到干净复现：`link:` junction 在某次换目标后，
+    进程内 Node 的 fs realpath 缓存让重解析仍返回旧目标 realpath，import 撞上
+    旧模块缓存 → 更新"假成功"。**结论：`link:` 本地 bundle 走 junction、换目标
+    需重启才可靠；npm 正式包不受影响**（web 自更新 0.4.6→0.4.7→0.4.8 三次均
+    加载新代码，`v0.4.x` 后缀为证）。
+- web profile 现装 `dsh-hot-installer@^0.4.8`，运行中即 0.4.8（自更新，
+  全程未重启）。

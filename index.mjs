@@ -40,7 +40,7 @@
 // `dsh plugin add` / `dsh plugin remove` / `dsh plugin update` is hot.
 
 import { readFile, writeFile, appendFile, mkdir } from 'node:fs/promises'
-import { existsSync } from 'node:fs'
+import { existsSync, realpathSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { createRequire } from 'node:module'
 import { basename, dirname, join } from 'node:path'
@@ -327,8 +327,24 @@ export function removePatches(patches, bundlePatches) {
  */
 export function evictBundleModules(internal, packageDir, requireCache) {
   let evicted = 0
-  if (internal && internal.loadCache && packageDir && typeof internal.loadCache.keys === 'function') {
-    const prefix = packageDir.toLowerCase()
+  if (!packageDir) return 0
+  // Match against both the resolved node_modules path AND its realpath: on
+  // Windows, pnpm links cache under the node_modules path (preserved), while
+  // a `link:` junction to an external dir caches under the junction target's
+  // realpath (resolution follows the junction). Evicting only one form leaves
+  // the other version's module cached forever.
+  const prefixes = new Set([packageDir.toLowerCase()])
+  try {
+    prefixes.add(realpathSync(packageDir).toLowerCase())
+  } catch { /* dangling or broken link: the plain path prefix still applies */ }
+  const matches = (path) => {
+    const lower = path.toLowerCase()
+    for (const prefix of prefixes) if (lower.startsWith(prefix)) return true
+    return false
+  }
+  if (internal && internal.loadCache && typeof internal.loadCache.keys === 'function') {
+    // Use Map.prototype methods on loadCache: Node 24's LoadCache.delete()
+    // only nulls the type slot instead of removing the entry.
     for (const url of [...internal.loadCache.keys()]) {
       let path = ''
       try {
@@ -336,16 +352,15 @@ export function evictBundleModules(internal, packageDir, requireCache) {
       } catch {
         continue
       }
-      if (path.toLowerCase().startsWith(prefix)) {
+      if (matches(path)) {
         Map.prototype.delete.call(internal.loadCache, url)
         evicted += 1
       }
     }
   }
-  if (requireCache && packageDir) {
-    const prefix = packageDir.toLowerCase()
+  if (requireCache) {
     for (const key of Object.keys(requireCache)) {
-      if (key.toLowerCase().startsWith(prefix)) delete requireCache[key]
+      if (matches(key)) delete requireCache[key]
     }
   }
   return evicted
