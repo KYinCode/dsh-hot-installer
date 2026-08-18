@@ -148,3 +148,26 @@ bundle 的 `cordis.patch.yml` → 把其行注入 root include entry → 热生�
 - web profile 已装 `dsh-hot-installer@^0.4.4`（重启生效；重启后先做一次
   add/remove 往返验证 watcher 存活，再观察自更新是否打印
   `hot-reloaded dsh-hot-installer` + 第二次 `active`）。
+
+## 0.4.5 / 0.4.6 记录（2026-08-18）— 自更新实测 + ESM 缓存谎言揭穿
+
+- **0.4.5 自更新首次成功**：`add dsh-hot-installer@latest`（0.4.4→0.4.5）日志
+  出现 `hot-reloaded dsh-hot-installer` + 3ms 后第二次 `active`——死锁修复
+  生效。0.4.5 同时给启动日志加自身版本号（`OWN_VERSION` 从 ./package.json
+  读取；磁盘与进程版本可漂移，日志必须说明实际加载的是哪个版本）。
+- **ESM 缓存谎言**：0.4.5 自更新后的 `active` 没有 `v0.4.5` 后缀——不是
+  读版本号失败，而是**重挂后 import 的仍是旧模块**。探针（esm-cache-probe.mjs）
+  实证：`import()` 按 URL 缓存，同 URL 二次 import 返回旧模块，URL 加 query
+  才加载新的。loader 的 `internal.import(name, baseUrl)` 不做缓存失效，所以
+  0.3.0 以来所有 `hot-reloaded` 日志都是假象：行重挂了，代码还是旧的。
+- **0.4.6 修复**：`hotReload` 重挂前 `evictBundleModules`——按包目录前缀清掉
+  `loader.internal.loadCache`（用 `Map.prototype.delete`，Node 24 的
+  LoadCache.delete 只清槽位）和 CJS `require.cache`，与 HMR 服务自己的缓存
+  处理一致；新增日志 `evicted N cached modules for <pkg> (from -> to)`。
+- **0.4.6 实测**：① 进程内一次性驱逐（动态插件 evict-1）→ `add pkg@0.4.6`
+  精确版 → `active ... v0.4.6`——驱逐后确实加载新代码；② 手改 manifest
+  spec（0.4.6→^0.4.6）→ 内置驱逐触发：`evicted 2 cached modules` +
+  `hot-reloaded` + `active ... v0.4.6`——内置路径全通。
+- 诊断工具：`esm-cache-probe.mjs`（仓库根，复现同 URL 缓存行为）。
+- web profile 现装 `dsh-hot-installer@^0.4.6`，运行中即 0.4.6（自更新，
+  全程未重启）。

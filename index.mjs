@@ -18,8 +18,9 @@
 // recorded patch entries are stripped out of the same config.patches and the
 // loader diff unloads the rows. When a bundle's DEPENDENCY SPEC changes
 // (`dsh plugin add pkg@latest`), the row is removed and re-added in one
-// step, which forces the loader to re-import the module and pick up the new
-// code (the ESM cache would otherwise serve the old module).
+// step (after evicting the bundle's modules from Node's ESM/CJS caches, which
+// the loader otherwise serves by URL forever), forcing a fresh import that
+// picks up the new code.
 //
 // Two protections cover the interaction with the user patch layer:
 // 1. REPLAY: boot's watchUserPatches recomposes the include from a static
@@ -45,6 +46,19 @@ import { createRequire } from 'node:module'
 import { basename, dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import * as yaml from 'js-yaml'
+
+// Own package version for the startup log line — disk and running process can
+// drift (an update installs files but the old module keeps running until the
+// row is reloaded), so the log must say which version actually loaded.
+const OWN_VERSION = await readFile(new URL('./package.json', import.meta.url), 'utf8')
+  .then((content) => {
+    try {
+      return JSON.parse(content).version ?? ''
+    } catch {
+      return ''
+    }
+  })
+  .catch(() => '')
 
 export const name = 'dsh-hot-installer'
 // Deliberately NO plugin-level inject: the entry must activate at boot even
@@ -297,6 +311,46 @@ export function removePatches(patches, bundlePatches) {
   return result
 }
 
+/**
+ * Evict a bundle's modules from Node's ESM and CJS caches so a re-added row
+ * re-imports the NEW files. The loader's `import()` caches by resolved URL:
+ * removing and re-adding a row with the same name serves the OLD module
+ * forever (verified live: a self-update kept running the previous version's
+ * code, and the startup log still lacked the new version). Mirror the HMR
+ * service's cache handling: use Map.prototype methods on loadCache, because
+ * Node 24's LoadCache.delete() only nulls the type slot instead of removing
+ * the entry.
+ * @param internal - `loader.internal` (Node's ModuleLoader), may be absent.
+ * @param packageDir - the bundle's package directory; cache keys under it are evicted.
+ * @param requireCache - the CJS module cache (best-effort, may be absent).
+ * @returns the number of ESM cache entries evicted.
+ */
+export function evictBundleModules(internal, packageDir, requireCache) {
+  let evicted = 0
+  if (internal && internal.loadCache && packageDir && typeof internal.loadCache.keys === 'function') {
+    const prefix = packageDir.toLowerCase()
+    for (const url of [...internal.loadCache.keys()]) {
+      let path = ''
+      try {
+        path = fileURLToPath(url)
+      } catch {
+        continue
+      }
+      if (path.toLowerCase().startsWith(prefix)) {
+        Map.prototype.delete.call(internal.loadCache, url)
+        evicted += 1
+      }
+    }
+  }
+  if (requireCache && packageDir) {
+    const prefix = packageDir.toLowerCase()
+    for (const key of Object.keys(requireCache)) {
+      if (key.toLowerCase().startsWith(prefix)) delete requireCache[key]
+    }
+  }
+  return evicted
+}
+
 // ---------------------------------------------------------------------------
 // runtime
 // ---------------------------------------------------------------------------
@@ -534,13 +588,22 @@ export async function apply(ctx) {
     log(ctx, 'error', `rollback to ${from} failed — removed ${packageName} from the profile bundle list so dsh stays bootable; re-add it with 'dsh plugin --profile ${basename(profileDir)} add ${packageName}@${from}' after fixing the registry issue`)
   }
 
-  /** Version-spec change: drop the row and re-add it so the loader re-imports the new module. */
+  /** Version-spec change: drop the row and re-add it with the bundle's modules evicted from the ESM/CJS caches, so the loader re-imports the NEW code. */
   async function hotReload(packageName, from, to) {
     // Pre-flight: parse the NEW package's patch list BEFORE touching the live
     // row. If the new patch cannot be resolved or parsed, the old row stays
     // mounted untouched and the caller logs restart-required — the failure
     // must never cost the user a working plugin.
     const nextPatches = await readBundlePatch(profileDir, packageName)
+    // Evict the bundle's modules BEFORE re-adding the row: the loader imports
+    // by URL, so without eviction the re-added row would keep running the OLD
+    // module forever (verified live — pre-0.4.6 "hot-reloaded" logs lied
+    // about the code actually changing).
+    const packageDir = resolveBundleDir(profileDir, packageName)
+    if (packageDir) {
+      const evicted = evictBundleModules(loader && loader.internal, packageDir, createRequire(join(profileDir, 'package.json')).cache)
+      if (evicted > 0) log(ctx, 'info', `evicted ${evicted} cached module${evicted === 1 ? '' : 's'} for ${packageName} (${from} -> ${to})`)
+    }
     const patches = bundlePatches.get(packageName)
     if (patches !== undefined && patches.length > 0) {
       await hotRemove(ctx, includeEntry, packageName, patches)
@@ -680,6 +743,6 @@ export async function apply(ctx) {
     // hot-installed rows; bring them back unless intentionally disabled.
     const replayTimer = setInterval(() => void enqueueReconcile(), REPLAY_INTERVAL_MS)
     ctx.effect(() => () => clearInterval(replayTimer))
-    log(ctx, 'info', `active — watching ${manifestPath} for new/removed/updated profile bundles (hot install/remove/reload enabled)`)
+    log(ctx, 'info', `active — watching ${manifestPath} for new/removed/updated profile bundles (hot install/remove/reload enabled${OWN_VERSION ? `, v${OWN_VERSION}` : ''})`)
   })
 }

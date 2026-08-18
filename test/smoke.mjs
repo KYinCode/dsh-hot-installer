@@ -6,7 +6,7 @@ import assert from 'node:assert/strict'
 import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { readBundles, diffBundles, resolveBundleDir, parsePatchList, dedupeInserts, deepEqual, removePatches, readDependencySpecs, diffSpecs, missingPatches, disabledIds, replayablePatches } from '../index.mjs'
+import { readBundles, diffBundles, resolveBundleDir, parsePatchList, dedupeInserts, deepEqual, removePatches, readDependencySpecs, diffSpecs, missingPatches, disabledIds, replayablePatches, evictBundleModules } from '../index.mjs'
 
 test('readBundles: reads the bundle layer, tolerates missing shapes', () => {
   assert.deepEqual(readBundles({ dsh: { profile: { bundles: ['a', 'b'] } } }), ['a', 'b'])
@@ -171,4 +171,30 @@ test('disabledIds: reads explicit disabled markers from a parsed patch list', ()
   ].join('\n'), 'cordis.patch.yml')
   const ids = disabledIds(patches)
   assert.deepEqual([...ids], ['a'])
+})
+
+test('evictBundleModules: removes only cache entries under the package dir', () => {
+  const internal = {
+    loadCache: new Map([
+      ['file:///C:/Users/KYin/.dsh/profiles/web/node_modules/dsh-hot-installer/index.mjs', {}],
+      ['file:///C:/Users/KYin/.dsh/profiles/web/node_modules/dsh-hot-installer/cordis.patch.yml', {}],
+      ['file:///C:/Users/KYin/.dsh/profiles/web/node_modules/dsh-project-mcp-bridge/index.mjs', {}],
+      ['file:///C:/Users/KYin/.dsh/profiles/web/node_modules/dsh-hot-installer/index.mjs?t=1', {}], // query variants of the same module are evicted too
+    ]),
+  }
+  const requireCache = {
+    'C:\\Users\\KYin\\.dsh\\profiles\\web\\node_modules\\dsh-hot-installer\\index.cjs': {},
+    'C:\\Users\\KYin\\.dsh\\profiles\\web\\node_modules\\dsh-project-mcp-bridge\\index.cjs': {},
+  }
+  const packageDir = 'C:\\Users\\KYin\\.dsh\\profiles\\web\\node_modules\\dsh-hot-installer'
+  const evicted = evictBundleModules(internal, packageDir, requireCache)
+  assert.equal(evicted, 3)
+  assert.equal(internal.loadCache.size, 1)
+  assert.equal(internal.loadCache.has('file:///C:/Users/KYin/.dsh/profiles/web/node_modules/dsh-project-mcp-bridge/index.mjs'), true)
+  assert.equal('C:\\Users\\KYin\\.dsh\\profiles\\web\\node_modules\\dsh-hot-installer\\index.cjs' in requireCache, false)
+  assert.equal('C:\\Users\\KYin\\.dsh\\profiles\\web\\node_modules\\dsh-project-mcp-bridge\\index.cjs' in requireCache, true)
+  // absent internals / caches are a no-op
+  assert.equal(evictBundleModules(undefined, undefined, undefined), 0)
+  assert.equal(evictBundleModules({}, 'C:\\x', {}), 0)
+  assert.equal(evictBundleModules({ loadCache: {} }, 'C:\\x', {}), 0)
 })
