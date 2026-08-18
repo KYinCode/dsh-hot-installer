@@ -382,9 +382,17 @@ async function hotRemove(ctx, includeEntry, packageName, bundlePatches) {
   const current = previous ?? []
   const next = removePatches(current, bundlePatches)
   if (next.length === current.length) {
-    throw new Error('no matching rows found in the live include config')
+    // No recorded rows in the live include config: they are already gone — a
+    // patch-layer refresh dropped them, a hand-edit removed them, or a
+    // replay/remove race ran this removal after the recompose that unloaded
+    // them. Nothing is left to unload, so this is success, not a
+    // restart-worthy failure (the previous throw made `dsh plugin remove`
+    // report "restart required" for a row that was already unmounted).
+    log(ctx, 'info', `${packageName}: rows already gone from the live include config — nothing to unload`)
+    return false
   }
   await includeEntry.update({ config: { ...includeConfig, patches: next } })
+  return true
 }
 
 export async function apply(ctx) {
@@ -577,9 +585,11 @@ export async function apply(ctx) {
           continue
         }
         try {
-          await hotRemove(ctx, includeEntry, packageName, patches)
+          const unloaded = await hotRemove(ctx, includeEntry, packageName, patches)
           bundlePatches.delete(packageName)
-          log(ctx, 'info', `hot-removed ${packageName} (${patches.length} patch entr${patches.length === 1 ? 'y' : 'ies'})`)
+          if (unloaded) {
+            log(ctx, 'info', `hot-removed ${packageName} (${patches.length} patch entr${patches.length === 1 ? 'y' : 'ies'})`)
+          }
         } catch (error) {
           // Keep the mapping: a later manifest write retries the removal.
           log(ctx, 'error', `restart required for ${packageName}: ${String(error)}`)
@@ -645,7 +655,16 @@ export async function apply(ctx) {
   // loud, and a surface without HMR simply never starts the watcher.
   ctx.inject(['hmr'], async function startHotInstall(hmrCtx) {
     try {
-      const disposer = await hmrCtx.hmr.registerConfig(manifestPath, () => enqueueRefresh())
+      // The callback must NOT return the refresh chain: the HMR service awaits
+      // the callback and keeps its refresh task "running" while it is pending.
+      // If the chain ever waits on an include update that unloads this very
+      // entry (a self-update via `dsh plugin add dsh-hot-installer@latest`),
+      // entry disposal runs our disposer, which calls the HMR disposer, which
+      // awaits the still-running refresh task — a circular wait that leaves
+      // the watcher permanently deaf and the row half-unloaded. Returning
+      // immediately (void) keeps the HMR task short; the chain still
+      // serializes every refresh by itself.
+      const disposer = await hmrCtx.hmr.registerConfig(manifestPath, () => void enqueueRefresh())
       // Close the exact-path watcher when this fiber dies (a stale registration
       // would keep invoking a dead closure after a tree reload).
       hmrCtx.effect(() => () => disposer())

@@ -100,3 +100,51 @@ bundle 的 `cordis.patch.yml` → 把其行注入 root include entry → 热生�
 - **仓库 About**（gh 已设置）：双语 description + topics（dsh/deepseek-harness/
   hot-reload/cordis 等）。
 - web profile 已装 `dsh-hot-installer@^0.3.0`（下次重启生效）。
+
+## 0.4.x 记录（2026-08-18）— 更新防护链（预检/回滚/紧急卸载）+ 卸载竞态修复
+
+- **0.4.0 预检（preflight）**：`hotReload` 先解析新包的补丁声明再动旧行——
+  解析失败时旧行保持不动、只记 `restart required`，失败的更新绝不拆掉正在
+  工作的插件。
+- **0.4.1/0.4.2 回滚 + 紧急卸载**：新代码 import/apply 失败 →
+  `rollbackDependency` 用 pnpm 把依赖装回旧 spec，manifest 重写重新触发更新
+  路径（to→from）重载旧行。0.4.2 修死循环：pnpm 对 dangling `link:` spec 也
+  退出 0 却装不回可用包 → 回滚后必须 `readBundlePatch` 验证；验证失败 →
+  `emergencyUnmount`：把包从 bundles 摘掉保证 dsh 可启动，日志给出精确的
+  重新安装命令。
+- **0.4.3 卸载竞态修复**：5s 重放对账与补丁层重组存在竞态——重组先丢行、
+  对账时行还在树里就跳过补录，之后 `dsh plugin remove` 时行已不在活配置 →
+  旧逻辑抛 `no matching rows found` 误报 `restart required`（web 实测复现：
+  11:08:58 卸载 pomodoro）。修复：`hotRemove` 找不到记录行时视为已卸载成功
+  （行不在 include config，重组后必然已卸载），返回 false、不再抛错；
+  `hotReload` 同路径顺带受益（更新不再被同一竞态误判为失败）。
+- **验证**：0.4.2 在 scratch 实测（坏补丁被预检拦截、升级失败自动回滚、
+  回滚失败 emergencyUnmount、死循环终止）；0.4.3 修完后 web profile 更新为
+  `dsh-hot-installer@^0.4.3`，观察自热重载日志（`hot-reloaded dsh-hot-installer`）
+  或重启一次生效。
+
+## 0.4.4 记录（2026-08-18）— 自更新死锁修复（重要）
+
+- **症状**：web profile 重启到 0.4.2 后，第一次 `dsh plugin add
+  dsh-hot-installer@latest`（升级自己）之后 watcher 永久失聪——后续所有
+  manifest 写入（add/remove/原地改写）都无任何日志反应；插件列表显示
+  `hot-installer, 未挂载`（自己的行被摘掉后重挂从未完成）。旧 0.3.0 进程
+  在 11:08 之后同样失聪（同一死锁的不同触发路径）。
+- **根因（循环等待）**：HMR 的 `refreshConfig` 会 `await` 回调，回调挂起
+  期间 refresh 任务一直"运行中"；`registerConfig` 返回的 disposer 会
+  `await` 这个运行中的任务。自更新时：热摘自己的行 → loader 卸载本 entry
+  → 本插件的子 fiber 被 dispose → 执行我们自己挂的 disposer → 它调用 HMR
+  disposer → HMR disposer 等 refresh 任务 → refresh 任务等我们的回调 →
+  回调返回的是整条处理链（`enqueueRefresh()` 返回 chain）→ chain 正等
+  `includeEntry.update()` → update 等 entry 卸载完成 → **循环等待，永不
+  结束，无任何日志**。replay 定时器也排在同一条 chain 上，一并卡死。
+- **修复**：`registerConfig` 的回调改为 `() => void enqueueRefresh()`——不
+  再返回 chain，HMR refresh 任务立即结束，disposer 不再等待；chain 仍在
+  内部自行串行所有刷新。循环断裂，自更新可以完成（摘行→disposer 快速
+  收尾→重挂新行→新实例重新 registerConfig 并再次打印 `active`）。
+- **恢复**：include 的 config.patches 只活在内存（write 是 no-op），重启
+  时 boot 从磁盘（各 bundle 补丁 + cordis.patch.yml）重新合成，行必然
+  回来；manifest 磁盘状态本身干净。
+- web profile 已装 `dsh-hot-installer@^0.4.4`（重启生效；重启后先做一次
+  add/remove 往返验证 watcher 存活，再观察自更新是否打印
+  `hot-reloaded dsh-hot-installer` + 第二次 `active`）。
