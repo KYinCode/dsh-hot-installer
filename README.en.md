@@ -39,6 +39,8 @@ Upgrade reloads have a full protection chain: the new version is pre-flighted (i
 
 Local-development `link:` installs have one known corner: on Windows pnpm links them through a junction reparse point into your local directory, and the Node process caches the real path that junction resolves to. So when you switch the link target to a *different* directory during one running dsh and hot-upgrade, the row keeps running the OLD directory's old code — the log prints `hot-reloaded` (a false success), but the new code is never loaded and the bundle's own activation log still shows the old version. Published npm packages are unaffected (every version switch loads fresh code), and editing files in place inside the same link directory simply never triggers an auto-update (no spec change to detect). Mitigation: restart dsh after switching a link to a different directory, or publish the local package to npm and hot-upgrade via `dsh plugin add pkg@<new version>`.
 
+**Division of labour since dsh 0.1.6-alpha.2**: the platform's own `dsh-hmr` now watches the profile manifest and reconciles bundle add/remove natively, but it returns early when only a dependency spec changed — so hot version upgrades remain this plugin's job. It no longer competes for the same watched path (the platform registered it first): instead it polls the manifest once a second and handles only spec changes, keeping cache eviction, pre-flight, rollback and emergency-unmount intact. Both HMR service method names (`watchConfig` / `registerConfig`) are feature-detected, so one build runs on either dsh generation; the startup log states which mode is active.
+
 ## Development
 
 ```sh

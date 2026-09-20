@@ -6,7 +6,7 @@ import assert from 'node:assert/strict'
 import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { readBundles, diffBundles, resolveBundleDir, parsePatchList, dedupeInserts, deepEqual, removePatches, readDependencySpecs, diffSpecs, missingPatches, disabledIds, replayablePatches, evictBundleModules } from '../index.mjs'
+import { readBundles, diffBundles, resolveBundleDir, parsePatchList, dedupeInserts, deepEqual, removePatches, readDependencySpecs, diffSpecs, missingPatches, disabledIds, replayablePatches, evictBundleModules, patchRowIds } from '../index.mjs'
 
 test('readBundles: reads the bundle layer, tolerates missing shapes', () => {
   assert.deepEqual(readBundles({ dsh: { profile: { bundles: ['a', 'b'] } } }), ['a', 'b'])
@@ -197,4 +197,20 @@ test('evictBundleModules: removes only cache entries under the package dir', () 
   assert.equal(evictBundleModules(undefined, undefined, undefined), 0)
   assert.equal(evictBundleModules({}, 'C:\\x', {}), 0)
   assert.equal(evictBundleModules({ loadCache: {} }, 'C:\\x', {}), 0)
+})
+
+test('patchRowIds: collects insert row ids and id-targeted entries', () => {
+  const ids = patchRowIds([
+    { insert: [{ id: 'a' }, { id: 'b' }, { name: 'no-id' }] },
+    { id: 'c', config: { x: 1 } },
+    { insert: [{ id: 'a' }] },
+    null,
+    'nope',
+  ])
+  assert.deepEqual([...ids].sort(), ['a', 'b', 'c'])
+  assert.equal(patchRowIds(undefined).size, 0)
+  assert.equal(patchRowIds([]).size, 0)
+  // matches what dedupeInserts consumes for a reload decision
+  const configIds = patchRowIds([{ insert: [{ id: 'a' }] }])
+  assert.deepEqual(dedupeInserts([{ insert: [{ id: 'a' }, { id: 'z' }] }], configIds), [{ insert: [{ id: 'z' }] }])
 })

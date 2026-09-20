@@ -198,3 +198,47 @@ bundle 的 `cordis.patch.yml` → 把其行注入 root include entry → 热生�
     加载新代码，`v0.4.x` 后缀为证）。
 - web profile 现装 `dsh-hot-installer@^0.4.8`，运行中即 0.4.8（自更新，
   全程未重启）。
+
+## 0.5.0 记录（2026-09-20）— dsh 0.1.6-alpha.2 兼容（HMR 方法改名 + 平台接管装/卸）
+
+- **症状**：升级到 dsh `0.1.6-alpha.2` 后每次启动写
+  `failed to watch ...: TypeError: hmrCtx.hmr.registerConfig is not a function`，
+  热装功能静默失效（UI 无提示，只有日志）。
+- **平台侧变化**（读源码确认，未写进官方更新日志）：
+  - HMR 包从 `@deepseek-ai/cordis-plugin-hmr` 换成 `@deepseek-ai/dsh-hmr`，
+    方法 `registerConfig` → `watchConfig`（签名/返回值/重复注册报错字符串不变）。
+  - `dsh-hmr` 的 `Service.init` 现在**自己监听 `<profile>/package.json`**
+    （`dsh-hmr/lib/index.js:353/376`）并调用 `reconcileProfilePatches`
+    （`dsh-app-boot/lib/index.js:2131`）→ **装/卸 bundle 已平台原生支持**。
+  - 但 `refresh(true)` 在"bundles 列表没变"时直接 return（`:359`）→
+    **只有依赖版本号变化时平台不处理**，这正是本插件仍要补的缺口。
+  - 两代实现都只能在同一个路径注册一次 → 新平台下本插件注册必然撞
+    `config path already registered`。
+- **修复（0.5.0）**：
+  1. 特性探测：`hmr.watchConfig ?? hmr.registerConfig`；两者都缺 → 明确报错
+     （而不是 TypeError）。
+  2. 模式自适应：注册成功 → 老行为（自己管装/卸/升级 + 5s 重放）；
+     撞重复注册且平台是新 API → **specOnly 模式**：不抢路径，改为每秒轮询
+     清单，只处理 spec 变化（装/卸交给平台，只同步 bookkeeping 并索引新 bundle
+     的行以便日后升级）。两种模式启动日志分别写明。
+  3. **loader settle 修复**（0.5.0 关键 bug）：新 loader 下
+     `includeEntry.update()` 会在树真正摘掉行之前 resolve —— 实测 config.patches
+     4→3 时行仍挂载，导致 `dedupeInserts` 认为行还在、跳过重挂，只打印
+     `update applied, all rows already present`，**模块永不重载**（假成功）。
+     修法：删除后有界等待（`waitForRowsGone`，25ms 轮询 ≤2s，并先
+     `loader.await()`），重挂时按**权威的 config.patches** 去重而不是滞后的树。
+- **实测（scratch hot-a2，dsh 0.1.6-alpha.2，link: 装的本地构建）**：
+  - 启动日志：`active — dsh reconciles profile bundles natively; polling ...
+    every 1000ms for dependency-spec changes (hot update/reload enabled, v0.5.0)`
+    —— 无 TypeError、无重复注册报错 ✓
+  - 原生装：加测试 bundle → 其激活日志出现，本插件无 `hot-applied`（未重复处理）✓
+  - 原生卸：`remove` 成功，本插件无新增 error/warn ✓
+  - spec 热升级（自更新自己，连跑两次）：`evicted N cached modules` →
+    `hot-reloaded dsh-hot-installer (...)` → 第二条 `active ... v0.5.0`
+    —— 行真摘真挂、新模块加载、监听存活无死锁 ✓
+- 单元测试 14/14（新增 `patchRowIds`）；README 中英各补"0.1.6-alpha.2 起的
+  协作方式"一段。
+- **发布阻塞**：npm token 失效（`npm whoami` → 401，发布报 E404
+  not-permitted）。需换新 token 后再 `npm publish`，然后
+  `dsh plugin --profile web add dsh-hot-installer@latest` + 重启（web profile
+  仍在跑 0.4.8，且其 watcher 已死，必须重启才能生效）。
