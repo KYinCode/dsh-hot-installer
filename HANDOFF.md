@@ -239,6 +239,17 @@ bundle 的 `cordis.patch.yml` → 把其行注入 root include entry → 热生�
 - 单元测试 14/14（新增 `patchRowIds`）；README 中英各补"0.1.6-alpha.2 起的
   协作方式"一段。
 - **发布阻塞**：npm token 失效（`npm whoami` → 401，发布报 E404
-  not-permitted）。需换新 token 后再 `npm publish`，然后
-  `dsh plugin --profile web add dsh-hot-installer@latest` + 重启（web profile
-  仍在跑 0.4.8，且其 watcher 已死，必须重启才能生效）。
+  not-permitted）。2026-09-20 用户换了新的 granular token（Bypass 2FA +
+  Read and write）后发布成功。
+- **0.5.1（同日，纯文档）**：README 中英各加"我需要装吗（按 dsh 版本）"矩阵。
+  实测依据（npm dist-tags 与依赖）：
+  - `latest` = `0.1.5-rc.2` → 依赖 `@deepseek-ai/cordis-plugin-hmr@^1.0.17`
+    （旧 API、**不监听 profile 清单**）→ 稳定线上装/卸/升级全靠本插件。
+  - `alpha` = `0.1.6-alpha.2` → 依赖 `@deepseek-ai/dsh-hmr` → 装/卸原生，
+    本插件补 spec 升级 + 预检/回滚/紧急卸载。
+  所以"稳定版用户装了没用"是误解：恰恰相反，稳定线没有平台原生能力。
+- **待办（2027-01 前）**：npm 提示将移除 bypass-2FA granular token 的**直接发布**
+  能力，届时需改用 staged publish（`npm stage publish` + 审批）或其他发布方式。
+  另注意 granular token 名称不可重复、默认有效期 30 天（上次过期就是踩了这条）。
+- web profile 已装 `dsh-hot-installer@^0.5.1`（磁盘 0.5.1）；运行中的 web 进程
+  仍是旧的 0.4.8 且 watcher 已死，**必须重启一次**才能加载 0.5.0+ 的兼容修复。
