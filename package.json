@@ -27,7 +27,8 @@
     "index.mjs",
     "cordis.patch.yml",
     "README.md",
-    "README.en.md"
+    "README.en.md",
+    "CHANGELOG.md"
   ],
   "engines": {
     "node": ">=20"

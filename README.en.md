@@ -1,6 +1,6 @@
 # dsh-hot-installer
 
-[English](README.en.md) | [中文](README.md)
+[English](README.en.md) | [中文](README.md) | [Changelog](CHANGELOG.md)
 
 **Once installed, `dsh plugin add` / `remove` / `update` never require a restart again.** Install once, restart once, and this plugin watches your profile's bundle list for you: newly added packages mount immediately, removed ones unload immediately, upgraded ones reload in place — and even if you hand-edit your patch files, it replays hot-installed rows that the rebuild dropped.
 
