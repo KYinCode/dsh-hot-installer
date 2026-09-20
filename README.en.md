@@ -4,6 +4,15 @@
 
 **Once installed, `dsh plugin add` / `remove` / `update` never require a restart again.** Install once, restart once, and this plugin watches your profile's bundle list for you: newly added packages mount immediately, removed ones unload immediately, upgraded ones reload in place — and even if you hand-edit your patch files, it replays hot-installed rows that the rebuild dropped.
 
+## Do I need this? (by dsh version)
+
+| Your dsh | What the platform itself does | What this plugin adds |
+| --- | --- | --- |
+| `0.1.5-rc.2` (npm `latest`, what a normal install gets) | HMR only watches patch files and **never looks at the profile manifest**: every add/remove/update needs a restart | **Everything** — add, remove and upgrade all take effect without a restart |
+| `0.1.6-alpha.2` and later | The platform ships `dsh-hmr`, which owns the manifest and **reconciles add/remove natively** | The part the platform skips: **dependency version upgrades** (`add pkg@<new version>`) still stay hot, plus pre-flight, rollback on failure and emergency unmount |
+
+So on the stable line this plugin is not redundant — it *is* the mechanism; on the newer alpha line it still earns its place (the platform neither handles version upgrades nor rolls back a failed one). If the platform ever covers both, this plugin can be uninstalled.
+
 ## What it is
 
 In DeepSeek Harness everything is a plugin, but after `dsh plugin --profile web add <pkg>` you had to restart `dsh web` for the new bundle to mount — the profile's bundle list (`dsh.profile.bundles` in `package.json`) is only read at startup and nothing in the running process watches it. Removal was worse: `dsh plugin remove <pkg>` deletes the package from disk, but the mounted plugin row stays alive in memory, so the next page reload shows "Failed to load plugins" — the client still asks the deleted package for its code. Version updates were equally cold: the new code only loaded on restart.
