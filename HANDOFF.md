@@ -515,3 +515,18 @@ bundle 的 `cordis.patch.yml` → 把其行注入 root include entry → 热生�
 - 旧版 app-boot **有** `anchorInsertedPluginNames`（rc.2/rc.3 各 2 处）→ 0.5.3 的 name 锚定改写对旧版同样正确。
 - 旧版 `resolveBundleDir` 同样是 `for (const anchor of [installAnchor, join(profileDir, "package.json")])` → **安装锚点优先**，与 0.1.7 一致。
 - 旧版 bundle 补丁只接受字符串（`join(packageDir, declared)`）→ 0.5.2 的数组支持在旧版是纯超集，无副作用。
+
+## 实验版原生热装/热卸实测（2026-09-22，dsh 0.1.7-alpha.1）
+
+**动机**：0.5.0 记录里"原生卸"的证据只有"remove 成功 + 本插件无新增 error/warn"，**没有证明行真的被卸载**（没报错 ≠ 已卸载）。本次用可观测探针补上。
+
+- 探针 bundle `dsh-native-probe`：`apply()` 写一行 `active`；`ctx.effect(() => () => mark('disposed'))` 在行被 dispose 时写 `disposed`。挂载与卸载都可观测。
+- 环境：真实 alpha dsh（0.1.7-alpha.1）+ scratch profile `native-live`（web 模板 + `link:` 装本插件 v0.5.4）。
+  启动日志 `active — dsh reconciles profile bundles natively; polling …` → **specOnly 模式**（平台 owns add/remove），正是要测的分工。
+- **热装**：`dsh plugin --profile native-live add dsh-native-probe@link:…` → 探针日志 `[11:49:15] active`；
+  本插件日志**零新增**（是平台挂的，不是我们）✓
+- **热卸**：`dsh plugin --profile native-live remove dsh-native-probe` → 探针日志 `[11:49:26] disposed`；
+  本插件日志**零新增**；profile bundles 回到 3 个 ✓
+- **结论**：实验版（0.1.6-alpha.2 起，含 0.1.7-alpha.1）**确实自带热装 + 热卸，而且卸载是真正的卸载（行被 dispose）**。
+  本插件在该代只补平台跳过的"依赖版本变化"那一段（见 0.5.0 / 0.5.1）。
+- 清理：kill scratch 进程、删 `native-live` profile、探针 bundle 与 `~/.dsh/logs/dsh-native-probe`、临时文件；真实 web 实例未受影响。
