@@ -345,6 +345,7 @@ bundle 的 `cordis.patch.yml` → 把其行注入 root include entry → 热生�
   → `removePatches` / `missingPatches` 的 deepEqual 匹配失效（卸载退化成 `rows already gone`，重放可能重复追加）。
   **本次实测扫了本 profile 全部 9 个 bundle 补丁文件（含 `dsh-web-app` 的 5 个）：anchor-relevant 的 `name` = 0 个**
   （都是裸包名）→ 今日不可达。要修是独立的一小步（同款 `pathToFileURL(resolve(dirname(file), name))`），超出 0.5.2 范围。
+  → **已在 0.5.3 修复，见文末「0.5.3 记录」。**
 
 ### 观察（未改，供后续）
 - `waitForRowsGone` 的 2s 有界等待对 **112 行**的 `dsh-web-app` 不够：重挂后会跟一条
@@ -355,3 +356,51 @@ bundle 的 `cordis.patch.yml` → 把其行注入 root include entry → 热生�
   脚本的错，不是插件的。
 - `~/.dsh/profiles/node_modules/@deepseek-ai/cordis-plugin-hmr` 是**悬空 junction**（改名后目标已不存在）——平台残留，未动。
 - `--dump-config-schema` 的 4 条 `unrecognized Loader tree carrier` 与本仓库无关，依旧不修。
+
+## 0.5.3 记录（2026-09-22）— 补上平台的 insert name 锚定
+
+### 问题（0.5.2 的「潜在分歧」，本次修掉）
+- 平台 `parsePatchList`（`dsh-app-boot/lib/index.js:3185-3197`）收尾调用 `anchorInsertedPluginNames`（`:3163-3171`）：
+  把 insert 行里**绝对路径 / `./` / `../` 开头的 `name`** 改写成**紧邻该补丁文件**的 `file://` URL（`pathToFileURL(resolve(dirname(resolve(file)), name))`），
+  并递归进 `group: true` 行的 `config` 数组；裸包名、断言式名字、`some.pkg` 这类非路径值保持字面量。
+  三个版本都如此：`0.1.5-rc.3` / `0.1.6-alpha.2` / `0.1.7-alpha.1` 的 app-boot 里都有这个函数。
+- bundle 补丁走 `loadOverlayPatches()`、profile 补丁层走 `loadOptionalPatches()`（`:3134-3143`），**两者都调 `parsePatchList`** → 活配置里存的是锚定形式。
+  本插件此前不做改写 → **记录的未锚定行与活配置的锚定行 deepEqual 匹配不上**：
+  热卸摘不掉（退化日志 `rows already gone … nothing to unload`）、重挂被去重成空（`all rows already present`）、
+  连 `hot-reloaded` 都不打印，行继续跑旧模块 —— 就是 0.4.6 揭穿过的那类"假成功"。
+
+### 修复
+- 新增导出 `anchorInsertedPluginNames(patches, file)`（与平台逐字同款，含 `group.config` 递归；`insert` 用 `Array.isArray` 守卫，
+  平台那里是 `patch.insert?.forEach`，非数组 insert 在平台会抛 TypeError，我们跳过），`parsePatchList` 收尾 `return anchorInsertedPluginNames(parsed, file)`。
+  因为 `readBundlePatch` 是**逐文件**调用 `parsePatchList(text, patchPath)`，数组声明下每个文件的 name 各自锚定到**自己所在目录**
+  （`presets/x.patch.yml` 里的 `../lib/y.mjs` → 包根 `lib/y.mjs`），与平台 `patchPaths.flatMap(loadOverlayPatches)` 一致。
+- 单测 16 → 17。
+
+### 验证
+- **与平台逐条对照**（脚本用平台自己导出的 `resolveBundleDir` / `bundlePatchPaths` / `loadOverlayPatches`，拿 `deepEqual` 比）：
+  - 真实 web profile：`dsh-base` 1、`dsh-web-app` **33**、`dsh-hot-installer` 1、`@local/dsh-mcp-chrome-devtools` 1、
+    `voice-input` 1 —— 在 **js-install 与 nvm-install 两种安装锚点下全部 equal=YES**。
+    注意两侧解析出的 `packageDir` 字符串其实**不同**（我们用 profile 侧 junction 路径，平台安装锚点侧用安装目录路径），
+    只是因为现有文件里没有相对 name，锚定是 no-op，所以结果相同 —— 见下方「残留」。
+  - 合成 bundle（相对 `./lib/plugin.mjs`、`../lib/other.mjs`、绝对路径、裸包名、`group` 嵌套相对 name）：
+    **MISMATCHES: 0**，输出逐字等于平台。
+- **scratch 活测 A/B**（profile `anchor-live`，web 模板 + `link:` 本地构建 + 一个 `name: ./lib/plugin.mjs` 的自造 bundle，`--port 0 --no-open`）：
+  - 启动：行以相对路径挂上（boot 日志 `[anchor-live] row active`）✓
+  - 翻转 spec `1.0.0 -> ^1.0.0`（**带锚定**）：`evicted 1 cached module` →
+    `hot-reloaded anchor-live-bundle (1.0.0 -> ^1.0.0, 1 patch entry)`，行激活日志 **1 → 2**（真摘真挂），无 `rows already gone` ✓
+  - **对照实验**：临时把收尾改成 `return parsed`（模拟 0.5.2 行为）、重启同一 profile、反向翻转 `^1.0.0 -> 1.0.0`：
+    `evicted 1 cached module` → `rows already gone from the live include config — nothing to unload` →
+    `update applied, all rows already present`，行激活日志**停在 1（从未重载）** ✓
+    —— 这条对照把"修复生效"从相关变成了因果。验证后已立刻恢复锚定（`grep TEMP-COUNTERFACTUAL` = 0，单测 17/17）。
+- 清理：kill scratch 进程（注意 PowerShell 的 `$pid` 是只读自动变量，`foreach ($pid in …)` 会静默不执行，用别的变量名）、
+  删 `~/.dsh/profiles/anchor-live`、`anchor-probe` 与临时文件；确认共享锚点未被污染、web profile 未被动过、live web 实例（PID 33156）健康。
+
+### 残留（已记录，未改）
+- 平台解析 bundle 目录时**先试安装锚点**（`installAnchor`）、失败才回落 profile 侧（`resolveBundleDir`，`:702-708`）；
+  本插件只用 profile 侧。对"存在于 dsh 安装树里"的 bundle（如 `dsh-base`、`dsh-web-app`、`voice-input`），
+  两侧 `packageDir` 字符串不同 → **若这类 bundle 也用相对 name，锚定结果仍会不一致**。
+  今天不可达：安装树自带的 bundle 都用裸包名（9 个补丁文件 scan 结果 0），且没有 dependency 条目的那几个已被 (b) 排除出 update 管理。
+  要彻底消除，需要让插件复刻"安装锚点优先"的解析顺序（得先拿到 launcher 的 `INSTALL_ANCHOR`，改动面比本修复大），暂不做。
+- 另注：`~/.dsh/profiles/web/package.json` 当前把 `@deepseek-ai/dsh-experimental-agent-team-profile` 列进了 bundles（共 6 个），
+  但该包并未安装 → **下次启动会有 1 条** `cannot index @deepseek-ai/dsh-experimental-agent-team-profile for hot reload`
+  （`cannot resolve … run 'dsh plugin --profile web install'`）。这是正确诊断（列了却没装），与 0.5.2/0.5.3 的修复无关。

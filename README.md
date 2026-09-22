@@ -52,6 +52,8 @@ dsh plugin --profile web add some-plugin@latest   # 立即升级重载，不用�
 
 **dsh 0.1.7-alpha.1 起**：`dsh.bundle.patch` 从"单个文件路径"扩展为**有序文件数组**（`dsh-web-app` 已改成 5 个文件：主补丁 + 4 个 agent preset），插件按**声明顺序**逐个解析并拼接，顺序与平台一致（行记录靠深度相等匹配，顺序错了就摘不掉行）；单文件声明照旧。另外，profile 模板自带的 bundle（`dsh-base` / `dsh-web-app`，在 `dependencies` 里**没有**条目）只做索引、不纳入版本热更新——它们的组合由平台自己负责，而"回滚到空 spec"会执行 `pnpm add <pkg>@`，那不是报错而是**装该包的 latest**（`dsh-web-app@` 会解析到 0.0.1-rc.1），属于静默降级。
 
+**0.5.3 起补上的一个细节**：平台解析任何补丁文件时（bundle 补丁、`--patch` overlay、profile 补丁层），都会把 insert 行里**绝对路径 / `./` / `../` 开头的 `name`** 改写成"紧邻该补丁文件"的 `file://` URL。插件现在做同样的改写，否则记录的行与活配置里的行匹配不上：热卸会退化成 `rows already gone`、重挂被去重成空，行继续跑旧代码却不报错。裸包名（如 `@deepseek-ai/dsh-persona`）保持原样。
+
 ## 开发与验证
 
 ```sh

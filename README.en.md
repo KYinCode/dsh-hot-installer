@@ -52,6 +52,8 @@ Local-development `link:` installs have one known corner: on Windows pnpm links 
 
 **Since dsh 0.1.7-alpha.1**: `dsh.bundle.patch` widened from one file path to an **ordered list of files** (`dsh-web-app` now names five: its main patch plus four agent presets). The plugin parses and concatenates them in declaration order, matching the platform (`bundlePatchPaths()` then a `flatMap`) — the order is load-bearing, because recorded rows are matched against the live include config by deep equality and a differently ordered concatenation would fail to strip them. Single-path declarations behave exactly as before. Also, bundles the profile template contributes (`dsh-base` / `dsh-web-app`, which have **no** `dependencies` entry) are indexed but excluded from version updates: the platform owns how they are composed, and a "rollback to an empty spec" runs `pnpm add <pkg>@` — which does not fail, it installs that package's `latest` (`dsh-web-app@` resolves to 0.0.1-rc.1), a silent downgrade.
 
+**Since 0.5.3** the plugin mirrors one more platform detail: every patch file the platform parses (bundle patches, `--patch` overlays, the profile layer) has insert-row `name` values that are absolute or start with `./` / `../` rewritten into `file://` URLs anchored beside that patch file. Without the same rewrite the recorded rows no longer match the live include config: hot-remove degrades to `rows already gone`, the re-add dedupes to nothing, and the row keeps running stale code without any error. Bare package names (e.g. `@deepseek-ai/dsh-persona`) stay literal.
+
 ## Development
 
 ```sh

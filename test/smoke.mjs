@@ -5,7 +5,8 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
+import { pathToFileURL } from 'node:url'
 import { readBundles, diffBundles, resolveBundleDir, readBundlePatch, parsePatchList, dedupeInserts, deepEqual, removePatches, readDependencySpecs, diffSpecs, classifySpecUpdates, missingPatches, disabledIds, replayablePatches, evictBundleModules, patchRowIds } from '../index.mjs'
 
 test('readBundles: reads the bundle layer, tolerates missing shapes', () => {
@@ -40,6 +41,48 @@ test('resolveBundleDir: finds a package through the profile node_modules lookup'
   } finally {
     await rm(root, { recursive: true, force: true })
   }
+})
+
+test('parsePatchList: anchors inserted plugin paths beside the patch file', () => {
+  // dsh-app-boot's parser rewrites insert `name` values that are paths into
+  // file:// URLs anchored beside the patch file; the live include config holds
+  // that anchored form, so our recorded rows must match it or deep-equality
+  // row removal can never find them.
+  const bundleDir = join(tmpdir(), 'demo-bundle')
+  const file = join(bundleDir, 'cordis.patch.yml')
+  const patch = [
+    '- insert:',
+    '    - id: rel',
+    "      name: './lib/plugin.mjs'",
+    '    - id: up',
+    "      name: '../shared/other.mjs'",
+    '    - id: bare',
+    "      name: '@deepseek-ai/dsh-persona'",
+    '    - id: dotted',
+    "      name: 'some.pkg'",
+    '    - id: group-row',
+    '      group: true',
+    '      config:',
+    '        - id: nested',
+    "          name: './nested.mjs'",
+    '        - id: nested-bare',
+    "          name: 'plain-pkg'",
+  ].join('\n')
+  const [entry] = parsePatchList(patch, file)
+  const rows = entry.insert
+  const byId = (id) => rows.find((row) => row.id === id)
+
+  assert.equal(byId('rel').name, pathToFileURL(join(bundleDir, 'lib', 'plugin.mjs')).href)
+  assert.equal(byId('up').name, pathToFileURL(resolve(bundleDir, '..', 'shared', 'other.mjs')).href)
+  // bare package specifiers (and anything that is not a path) stay literal
+  assert.equal(byId('bare').name, '@deepseek-ai/dsh-persona')
+  assert.equal(byId('dotted').name, 'some.pkg')
+  // group rows recurse into their config array, exactly like the platform
+  const nested = byId('group-row').config
+  assert.equal(nested[0].name, pathToFileURL(join(bundleDir, 'nested.mjs')).href)
+  assert.equal(nested[1].name, 'plain-pkg')
+  // unrelated fields are untouched
+  assert.equal(byId('group-row').group, true)
 })
 
 test('readBundlePatch: accepts one path or an ordered list of paths', async () => {
@@ -79,6 +122,18 @@ test('readBundlePatch: accepts one path or an ordered list of paths', async () =
     // empty array: a bundle that contributes no rows
     await makeBundle('empty-bundle', [])
     assert.deepEqual(await readBundlePatch(root, 'empty-bundle'), [])
+
+    // relative plugin names anchor against EACH FILE's own directory: the same
+    // form the platform composes at boot, and the form deep-equality row
+    // removal must see to strip the rows again
+    const anchor = await makeBundle('anchor-bundle', ['./cordis.patch.yml', './presets/deep.patch.yml'])
+    await writeFile(join(anchor, 'cordis.patch.yml'), ['- insert:', '    - id: main-rel', "      name: './main.mjs'"].join('\n'))
+    await writeFile(join(anchor, 'presets', 'deep.patch.yml'), ['- insert:', '    - id: preset-rel', "      name: '../shared/preset.mjs'"].join('\n'))
+    const anchored = await readBundlePatch(root, 'anchor-bundle')
+    assert.deepEqual(anchored.map((entry) => entry.insert[0].name), [
+      pathToFileURL(join(anchor, 'main.mjs')).href,
+      pathToFileURL(join(anchor, 'shared', 'preset.mjs')).href,
+    ])
 
     // malformed declarations must name the problem instead of leaking
     // path.join's ERR_INVALID_ARG_TYPE (which is what the array form did)

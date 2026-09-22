@@ -4,6 +4,19 @@ dsh-hot-installer 的所有已发布版本。版本号遵循 SemVer；0.x 期间
 
 日期为发布者本地日期（UTC+8），与 npm 页面显示的日期一致。
 
+## [0.5.3] — 2026-09-22
+
+### 修复
+- **补丁里用相对/绝对路径声明插件名时，热装 / 热更新 / 热卸会静默失效**。平台的解析器（`dsh-app-boot` 的 `parsePatchList`——bundle 补丁、`--patch` overlay、profile 补丁层都走它）在收尾时会把 insert 行里**绝对路径或 `./` / `../` 开头的 `name`** 改写成"紧邻该补丁文件"的 `file://` URL；本插件此前不做这个改写，于是**记录的行与活配置里的行深度相等匹配不上**：热卸摘不掉（日志退化成 `rows already gone … nothing to unload`），重挂又被去重成空（`all rows already present`），既不打印 `hot-reloaded`、行也继续跑旧模块——正是 0.4.6 揭穿过的那类"假成功"。现在 `parsePatchList` 收尾调用与平台逐字一致的 `anchorInsertedPluginNames`（含 `group.config` 递归；裸包名如 `@deepseek-ai/dsh-persona`、断言式名字与 `some.pkg` 这类非路径值保持字面量）。
+- 该改写对**目前所有已发布 bundle 都是 no-op**：实测本 profile 的 9 个 bundle 补丁文件（含 `dsh-web-app` 的 5 个）里 anchor-relevant 的 `name` = 0 个。它只影响未来这么写的 bundle，因此本次改动对现有行为零影响。
+
+### 新增
+- 单测 16 → 17：`parsePatchList` 的 name 锚定（相对、`../`、绝对、裸包名、带点非路径、`group` 递归），以及 `readBundlePatch` 数组声明下**每个文件各自目录**的锚定（`presets/x.patch.yml` 里的 `../lib/y.mjs` 落在包根，不是 `presets/` 下）。
+
+### 验证
+- 用平台自己导出的 `bundlePatchPaths` + `loadOverlayPatches` 做逐条对照：本 profile 全部可解析 bundle（含 `dsh-base`、`dsh-web-app` 33 条）在两种安装锚点下均**深度相等**；另造一个含相对/绝对 name 的合成 bundle，对照结果 **0 处不一致**。
+- scratch 活测 A/B：同一个含相对 name 的 bundle，同一份 profile，只切换本插件是否为锚定版本——有锚定 → `evicted 1 cached module` + `hot-reloaded anchor-live-bundle (1.0.0 -> ^1.0.0, 1 patch entry)`，行真的摘掉又重挂（激活日志 1 → 2）；无锚定（对照）→ `rows already gone … nothing to unload` + `all rows already present`，行**从未重载**（激活日志停在 1）。
+
 ## [0.5.2] — 2026-09-22
 
 ### 修复

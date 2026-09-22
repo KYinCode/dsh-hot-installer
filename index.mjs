@@ -59,8 +59,8 @@ import { readFile, writeFile, appendFile, mkdir } from 'node:fs/promises'
 import { existsSync, realpathSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { createRequire } from 'node:module'
-import { basename, dirname, join } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import * as yaml from 'js-yaml'
 
 // Own package version for the startup log line — disk and running process can
@@ -286,6 +286,42 @@ export function resolveBundleDir(profileDir, packageName) {
   return undefined
 }
 
+/**
+ * Convert inserted plugin paths to file URLs, anchoring relative paths beside
+ * the patch file. A deliberate mirror of `anchorInsertedPluginNames` in
+ * dsh-app-boot, which every platform patch load runs (`loadOverlayPatches` for
+ * bundle patches and `--patch` overlays, `loadOptionalPatches` for the profile
+ * layer).
+ *
+ * This is not cosmetic: the rows this plugin records are matched against the
+ * LIVE include config by deep equality, and the live config holds the ANCHORED
+ * form. Without the same rewrite, a bundle declaring `name: ./x.mjs` would
+ * hot-install a row whose relative path resolves against the profile instead of
+ * the bundle (the new plugin never loads), and hot-remove could never strip the
+ * anchored row (it stays mounted after the package is gone — exactly the
+ * "Failed to load plugins" failure this plugin exists to prevent).
+ *
+ * Assertion-style names stay literal, as on the platform: they are not paths.
+ * @param patches - a parsed patch list (mutated in place, like the platform's).
+ * @param file - the patch file the names are relative to.
+ * @returns the same list.
+ */
+export function anchorInsertedPluginNames(patches, file) {
+  const base = dirname(resolve(file))
+  const visit = (entry) => {
+    if (typeof entry.name === 'string' && (isAbsolute(entry.name) || entry.name.startsWith('./') || entry.name.startsWith('../'))) {
+      entry.name = pathToFileURL(resolve(base, entry.name)).href
+    }
+    if (entry.group && Array.isArray(entry.config)) entry.config.forEach(visit)
+  }
+  for (const patch of patches) {
+    // The platform writes `patch.insert?.forEach(visit)`; the guard keeps a
+    // non-array `insert` from turning into a TypeError here.
+    if (Array.isArray(patch.insert)) patch.insert.forEach(visit)
+  }
+  return patches
+}
+
 /** Parse a bundle's patch file: a top-level YAML array of loader patch entries. */
 export function parsePatchList(text, file) {
   let parsed
@@ -302,7 +338,9 @@ export function parsePatchList(text, file) {
       throw new Error(`patch entry ${index + 1} in ${file} must be a mapping (a loader patch entry)`)
     }
   })
-  return parsed
+  // Same final step as the platform's parser: rows must be recorded exactly as
+  // the live include config holds them, i.e. with plugin paths anchored.
+  return anchorInsertedPluginNames(parsed, file)
 }
 
 /**
