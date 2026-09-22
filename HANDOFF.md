@@ -327,6 +327,17 @@ bundle 的 `cordis.patch.yml` → 把其行注入 root include entry → 热生�
 - **待用户确认**：重启 dsh web 后该次启动的日志应为 `active … v0.5.2` 且**无** `cannot index`。重启不能由 agent 代做——
   3080 上跑的正是承载会话的 GUI 实例。
 
+- **与平台解析器的逐条对照（0.5.2 已验）**：平台 `parsePatchList`（`dsh-app-boot/lib/index.js:3185-3197`）与本插件的
+  同名函数语义一致——同一个 `JSON_SCHEMA.extend(JsExpr)` 方言、空文件/非数组同样抛 `must be a top-level YAML array of
+  loader patch entries`、非 mapping 条目同样抛 `entry N … must be a mapping`；bundle 补丁也走
+  `loadOverlayPatches() → parsePatchList()`（`:728`），所以数组声明下多个文件的解析口径与平台相同。
+- **一处潜在分歧（未改，今日不可达）**：平台的 `parsePatchList` 最后会调用 `anchorInsertedPluginNames`
+  （`:3163-3171`，由 `:3196` 调用），把 insert 行里**绝对路径 / `./` / `../` 开头的 `name`** 改写成"紧邻该补丁文件"的
+  `file://` URL；本插件不做这个改写。若将来某个 bundle 这么声明：`bundlePatches` 记录的是未锚定形式、而活配置里是锚定形式
+  → `removePatches` / `missingPatches` 的 deepEqual 匹配失效（卸载退化成 `rows already gone`，重放可能重复追加）。
+  **本次实测扫了本 profile 全部 9 个 bundle 补丁文件（含 `dsh-web-app` 的 5 个）：anchor-relevant 的 `name` = 0 个**
+  （都是裸包名）→ 今日不可达。要修是独立的一小步（同款 `pathToFileURL(resolve(dirname(file), name))`），超出 0.5.2 范围。
+
 ### 观察（未改，供后续）
 - `waitForRowsGone` 的 2s 有界等待对 **112 行**的 `dsh-web-app` 不够：重挂后会跟一条
   `… the previous row was still mounted when the new one was added — verify the reload took effect`。这是既有的诚实警告
