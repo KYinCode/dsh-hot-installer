@@ -24,6 +24,15 @@ dsh-hot-installer 的所有已发布版本。版本号遵循 SemVer；0.x 期间
 - **与平台逐条对照**（一次运行里同时比较"解析到的目录"和"解析出的补丁条目"）：web profile 全部 6 个 bundle **dir mismatches 0 / parse mismatches 0**；其中 `agent-team-profile` 两侧都落到安装树、都得到 5 个条目（旧代码这一项是 `ours=undefined`）。
 - **scratch 活测**（profile `inbox-live`：web 模板 + `link:` 本地构建 + 只把它加进 `bundles`、故意不给 dependency 条目，正是 in-box 形态）：启动日志**只有一行** `active … v0.5.4`、**无任何 warn**；`dump-config` 确认平台确实挂了它贡献的 7 行。对照：0.5.2/0.5.3 在同一形态下共留下 4 条 `cannot index @deepseek-ai/dsh-experimental-agent-team-profile`。
 
+### 说明：测试版（实验版）已自带插件热装 / 热卸
+- 平台侧从 dsh **0.1.6-alpha.2** 起由 `dsh-hmr` 自己监听 `<profile>/package.json`，**装 / 卸 bundle 已原生免重启**
+  （`dsh-hmr/lib/index.js:353-376`；`refresh(true)` 只在**有序 `dsh.profile.bundles` 不变**时提前返回，见 `:359`）。`0.1.7-alpha.1` 沿用同一机制。
+- 本插件在该代自动进入 **specOnly 模式**（不抢已被占用的监听路径，改为每秒轮询清单），
+  只补平台跳过的那一段：**依赖版本变化**（`dsh plugin add pkg@新版本`）+ 预检 / 失败回滚 / 紧急卸载防护链。
+- 2026-09-22 用可观测探针在真实 `0.1.7-alpha.1` 上实测：`add` → 探针写 `active`、本插件日志**零新增**；
+  `remove` → 探针写 **`disposed`**（行被真正 dispose，不是"没报错"）、本插件日志**零新增**。
+- 稳定线（`0.1.5-rc.2` / `0.1.5-rc.3`）**没有**这个能力，装 / 卸 / 升级**全靠本插件**（已用隔离环境 + 旧版自己的 CLI 实测）。
+
 ## [0.5.3] — 2026-09-22
 
 ### 修复
