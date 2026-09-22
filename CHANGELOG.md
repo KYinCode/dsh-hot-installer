@@ -4,6 +4,19 @@ dsh-hot-installer 的所有已发布版本。版本号遵循 SemVer；0.x 期间
 
 日期为发布者本地日期（UTC+8），与 npm 页面显示的日期一致。
 
+## [0.5.2] — 2026-09-22
+
+### 修复
+- **兼容 dsh 0.1.7-alpha.1 的「有序补丁文件数组」**：`dsh.bundle.patch` 从单个文件路径扩展为**有序文件数组**（`@deepseek-ai/dsh-web-app` 已改成 5 个文件：主补丁 + 4 个 agent preset）。此前 `readBundlePatch` 把声明直接当字符串交给 `path.join`，凡是数组声明的 bundle，每次启动都抛 `TypeError [ERR_INVALID_ARG_TYPE]`，只在日志里留一条 `cannot index <pkg> for hot removal`。现在按**声明顺序**逐个解析并拼接（与平台 `bundlePatchPaths()` → `flatMap` 的顺序一致；顺序错了，`removePatches` 的深度相等匹配就摘不掉行）；单文件声明行为完全不变；空数组返回 `[]`；既非字符串也非字符串数组时抛出与平台同义的清晰错误（`dsh.bundle.patch must be a file path or a list of file paths`），不再漏出 `path.join` 的内部错误。
+- **不再把「没有 dependency 条目」的 bundle 纳入版本热更新**：`dsh-base` / `dsh-web-app` 这类由 profile 模板贡献的 bundle 在 `dependencies` 里没有条目，插件记录到的 spec 是空串。此前它们的 spec 一旦变化就会走升级路径，而升级失败后的「回滚到空 spec」执行的是 `pnpm add <pkg>@` —— 实测这**不是**一条失败命令：它退出 0 并安装该包的 `latest`（`@deepseek-ai/dsh-web-app@` 解析到 **0.0.1-rc.1**），而 0.0.1-rc.1 仍声明可解析的补丁，于是回滚后的校验**通过**、profile 被**静默降级**——比 `emergencyUnmount` 更隐蔽。现在这类 bundle 只做索引与记账，spec 变化只记一条日志，交给平台或重启处理。新增纯函数 `classifySpecUpdates`。
+
+### 新增
+- `scripts.test`：`npm test` 即 `node --test`；中英 README 的开发命令同步改为 `npm test`。
+- 单测 14 → 16：`readBundlePatch` 的单文件声明 / 数组声明（含顺序）/ 空数组 / 非法声明，以及 `classifySpecUpdates` 对平台自有 bundle 的分流。
+
+### 说明
+- 本次修复对 dsh 稳定线（npm `latest` = 0.1.5-rc.2、`next` = 0.1.5-rc.3）**没有行为变化**：那条线上所有已发布的 bundle 都声明单个文件路径，而且平台自己的 `dsh-app-boot` 也只接受字符串（`join(packageDir, declared)`），数组声明在 boot 阶段就会 fail-loud，轮不到插件。上面两条加固同样只在失败路径上生效——把「静默改坏 profile」换成「不动作 + 一条日志」。
+
 ## [0.5.1] — 2026-09-20
 
 ### 文档

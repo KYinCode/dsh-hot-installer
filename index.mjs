@@ -45,6 +45,12 @@
 // updates (cache eviction + reload) plus the rollback/emergency-unmount chain.
 // On older dsh nothing changes — this plugin still owns add/remove/reload.
 //
+// dsh 0.1.7-alpha.1 also widened `dsh.bundle.patch` from one file path to an
+// ordered list of paths (readBundlePatch concatenates them in declaration
+// order). Bundles the platform's template contributes carry no `dependencies`
+// entry; those are indexed but excluded from update management — see the
+// platformOwned note in handleChange.
+//
 // Mounting: install once as a profile bundle (see package.json
 // dsh.bundle.patch and cordis.patch.yml), restart once. From then on, every
 // `dsh plugin add` / `dsh plugin remove` / `dsh plugin update` is hot.
@@ -171,6 +177,38 @@ export function diffSpecs(known, current) {
     if (previous !== spec) updates.push({ name, from: previous, to: spec })
   }
   return updates
+}
+
+/**
+ * Split dependency-spec changes into the ones this plugin hot-manages and the
+ * ones the platform owns.
+ *
+ * A bundle with NO `dependencies` entry is contributed by the platform's own
+ * profile template (dsh-base / dsh-web-app), not installed by `dsh plugin
+ * add`; its recorded spec is ''. The platform owns how those are composed, so
+ * a spec change on one is never ours to hot-reload:
+ *   - reloading it would re-mount the platform's own rows for nothing, and
+ *   - a failed reload "rolls back" to '' — and `pnpm add <pkg>@` does NOT
+ *     fail: it exits 0 and installs the package's `latest` dist-tag
+ *     (verified: `@deepseek-ai/dsh-web-app@` resolves to 0.0.1-rc.1). That
+ *     version still declares a parsable patch, so the post-rollback
+ *     verification PASSES and the profile is silently downgraded — quieter
+ *     than the emergency-unmount it was meant to avoid.
+ * These bundles stay in `known`/`bundlePatches` so they are never mistaken
+ * for added/removed later; only update management skips them.
+ *
+ * @param known - Map<name, spec> from the previous read.
+ * @param current - Map<name, spec> from the latest read.
+ * @returns {{ managed: Array, platformOwned: Array }} the same `{name, from, to}` shapes diffSpecs returns.
+ */
+export function classifySpecUpdates(known, current) {
+  const managed = []
+  const platformOwned = []
+  for (const update of diffSpecs(known, current)) {
+    if (update.from === '') platformOwned.push(update)
+    else managed.push(update)
+  }
+  return { managed, platformOwned }
 }
 
 /**
@@ -423,18 +461,20 @@ export function patchRowIds(patches) {
 }
 
 /**
- * Hot-install one newly added bundle: resolve its package dir, read its
- * dsh.bundle.patch, dedupe its insert rows against the live tree, and append
- * the patch list to the root include entry's config.patches. The include's
- * own patch application re-composes the tree and the loader diff activates
- * the new rows — the same path boot uses, so a restart composes identically.
- * @returns the number of patch entries applied (0 when all rows were already present).
+ * Read and parse one installed bundle's patch list (`dsh.bundle.patch`).
+ *
+ * dsh 0.1.7-alpha.1 widened the declaration from one file path to an ORDERED
+ * list of file paths (a single path stays valid; `@deepseek-ai/dsh-web-app`
+ * now declares five). The platform concatenates their patch lists in
+ * declaration order (`bundlePatchPaths()` -> `patchPaths.flatMap(...)` in
+ * dsh-app-boot), and that order is load-bearing here too: the recorded rows
+ * are matched against the live include config by deep equality, so a
+ * differently ordered concatenation would silently fail to strip them.
+ *
+ * @returns the parsed patch list, concatenated in declaration order (may be empty).
+ * @throws when the declaration is neither a path nor a list of paths.
  */
-/**
- * Read and parse one installed bundle's patch list (dsh.bundle.patch).
- * @returns the parsed patch list (may be empty).
- */
-async function readBundlePatch(profileDir, packageName) {
+export async function readBundlePatch(profileDir, packageName) {
   const packageDir = resolveBundleDir(profileDir, packageName)
   if (packageDir === undefined) {
     throw new Error(`cannot resolve ${packageName} from ${profileDir} — run 'dsh plugin --profile ${basename(profileDir)} install' if its dependency is not installed`)
@@ -444,8 +484,22 @@ async function readBundlePatch(profileDir, packageName) {
   if (declared === undefined) {
     throw new Error(`${packageName} declares no dsh.bundle in its package.json`)
   }
-  const patchPath = join(packageDir, declared)
-  return parsePatchList(await readFile(patchPath, 'utf8'), patchPath)
+  // Mirror the platform's own validation (bundlePatchFiles in dsh-app-boot):
+  // one path or an ordered list of paths. An unvalidated declaration leaked
+  // path.join's ERR_INVALID_ARG_TYPE, which said nothing about which bundle
+  // was misdeclared or how to fix it.
+  const files = typeof declared === 'string' ? [declared] : declared
+  if (!Array.isArray(files) || files.some((file) => typeof file !== 'string')) {
+    throw new Error(`${packageName}: dsh.bundle.patch must be a file path or a list of file paths`)
+  }
+  // Each element is resolved against the package dir on its own, so a failure
+  // names the exact file and the relative-path semantics stay per-element.
+  const patches = []
+  for (const file of files) {
+    const patchPath = join(packageDir, file)
+    patches.push(...parsePatchList(await readFile(patchPath, 'utf8'), patchPath))
+  }
+  return patches
 }
 
 /**
@@ -735,8 +789,15 @@ export async function apply(ctx) {
     for (const bundle of readBundles(manifest)) current.set(bundle, specs[bundle] ?? '')
     const added = diffBundles([...known.keys()], [...current.keys()])
     const removed = diffBundles([...current.keys()], [...known.keys()])
-    const updated = diffSpecs(known, current)
-    if (added.length === 0 && removed.length === 0 && updated.length === 0) {
+    // Spec changes this plugin manages vs. the platform's own template bundles
+    // (no dependency entry): those are indexed but never hot-updated here —
+    // see classifySpecUpdates for why rolling one back would silently
+    // downgrade the profile.
+    const { managed: updated, platformOwned } = classifySpecUpdates(known, current)
+    if (platformOwned.length > 0) {
+      log(ctx, 'info', `${platformOwned.map((update) => `${update.name} (${update.to})`).join(', ')}: provided by the platform's profile template (no dependency spec to update) — the platform owns this bundle, so its spec change is not hot-managed here (restart dsh to apply it)`)
+    }
+    if (added.length === 0 && removed.length === 0 && updated.length === 0 && platformOwned.length === 0) {
       known = current
       return
     }

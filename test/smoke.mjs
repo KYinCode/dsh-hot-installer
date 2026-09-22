@@ -6,7 +6,7 @@ import assert from 'node:assert/strict'
 import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { readBundles, diffBundles, resolveBundleDir, parsePatchList, dedupeInserts, deepEqual, removePatches, readDependencySpecs, diffSpecs, missingPatches, disabledIds, replayablePatches, evictBundleModules, patchRowIds } from '../index.mjs'
+import { readBundles, diffBundles, resolveBundleDir, readBundlePatch, parsePatchList, dedupeInserts, deepEqual, removePatches, readDependencySpecs, diffSpecs, classifySpecUpdates, missingPatches, disabledIds, replayablePatches, evictBundleModules, patchRowIds } from '../index.mjs'
 
 test('readBundles: reads the bundle layer, tolerates missing shapes', () => {
   assert.deepEqual(readBundles({ dsh: { profile: { bundles: ['a', 'b'] } } }), ['a', 'b'])
@@ -37,6 +37,63 @@ test('resolveBundleDir: finds a package through the profile node_modules lookup'
     await writeFile(join(root, 'package.json'), '{"name":"profile"}')
     assert.equal(resolveBundleDir(root, 'fake-bundle'), pkgDir)
     assert.equal(resolveBundleDir(root, 'missing-bundle'), undefined)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('readBundlePatch: accepts one path or an ordered list of paths', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dsh-hot-installer-'))
+  try {
+    await writeFile(join(root, 'package.json'), '{"name":"profile"}')
+    const makeBundle = async (name, patch) => {
+      const pkgDir = join(root, 'node_modules', name)
+      await mkdir(join(pkgDir, 'presets'), { recursive: true })
+      await writeFile(join(pkgDir, 'package.json'), JSON.stringify({ name, dsh: { bundle: { patch } } }))
+      return pkgDir
+    }
+    // row ids in parse order — the order the platform composes with, and the
+    // order `removePatches` must see to strip the rows again
+    const rowIds = (list) => list.flatMap((entry) => (Array.isArray(entry.insert) ? entry.insert.map((row) => row.id) : [entry.id]))
+    const mainPatch = ['- insert:', '    - id: main', "      name: 'main-pkg'"].join('\n')
+    const presetPatch = (id) => ['- insert:', `    - id: ${id}`, `      name: '${id}-pkg'`].join('\n')
+
+    // single string declaration: every dsh before 0.1.7-alpha.1, dsh-base, ...
+    const single = await makeBundle('single-bundle', './cordis.patch.yml')
+    await writeFile(join(single, 'cordis.patch.yml'), mainPatch)
+    assert.deepEqual(rowIds(await readBundlePatch(root, 'single-bundle')), ['main'])
+
+    // ordered array declaration (dsh-web-app on 0.1.7-alpha.1): the
+    // concatenation follows declaration order, and each element resolves
+    // against the package dir on its own
+    const multi = await makeBundle('multi-bundle', [
+      './cordis.patch.yml',
+      './presets/standard.patch.yml',
+      './presets/ptc.patch.yml',
+    ])
+    await writeFile(join(multi, 'cordis.patch.yml'), mainPatch)
+    await writeFile(join(multi, 'presets', 'standard.patch.yml'), presetPatch('preset-standard'))
+    await writeFile(join(multi, 'presets', 'ptc.patch.yml'), presetPatch('preset-ptc'))
+    assert.deepEqual(rowIds(await readBundlePatch(root, 'multi-bundle')), ['main', 'preset-standard', 'preset-ptc'])
+
+    // empty array: a bundle that contributes no rows
+    await makeBundle('empty-bundle', [])
+    assert.deepEqual(await readBundlePatch(root, 'empty-bundle'), [])
+
+    // malformed declarations must name the problem instead of leaking
+    // path.join's ERR_INVALID_ARG_TYPE (which is what the array form did)
+    await makeBundle('bad-bundle', 42)
+    await assert.rejects(readBundlePatch(root, 'bad-bundle'), /dsh\.bundle\.patch must be a file path or a list of file paths/)
+    await makeBundle('mixed-bundle', ['./cordis.patch.yml', 42])
+    await assert.rejects(readBundlePatch(root, 'mixed-bundle'), /dsh\.bundle\.patch must be a file path or a list of file paths/)
+    await makeBundle('nested-bad-bundle', [['./cordis.patch.yml']])
+    await assert.rejects(readBundlePatch(root, 'nested-bad-bundle'), /dsh\.bundle\.patch must be a file path or a list of file paths/)
+
+    const noBundle = join(root, 'node_modules', 'plain-bundle')
+    await mkdir(noBundle, { recursive: true })
+    await writeFile(join(noBundle, 'package.json'), '{"name":"plain-bundle"}')
+    await assert.rejects(readBundlePatch(root, 'plain-bundle'), /declares no dsh\.bundle/)
+    await assert.rejects(readBundlePatch(root, 'missing-bundle'), /cannot resolve missing-bundle/)
   } finally {
     await rm(root, { recursive: true, force: true })
   }
@@ -126,6 +183,34 @@ test('diffSpecs: reports only spec changes among shared names', () => {
   const current = new Map([['a', '^1.0.0'], ['b', '0.3.0'], ['c', '^0.1.0']])
   assert.deepEqual(diffSpecs(known, current), [{ name: 'b', from: '0.2.0', to: '0.3.0' }])
   assert.deepEqual(diffSpecs(known, known), [])
+})
+
+test('classifySpecUpdates: platform template bundles (no dependency entry) are not hot-managed', () => {
+  // dsh-base / dsh-web-app are in dsh.profile.bundles but carry no
+  // `dependencies` entry, so their recorded spec is ''. A spec change on one
+  // must never reach hotReload: its rollback target ('') makes
+  // `pnpm add <pkg>@` install the package's `latest` dist-tag.
+  const known = new Map([
+    ['@deepseek-ai/dsh-base', ''],
+    ['@deepseek-ai/dsh-web-app', ''],
+    ['dsh-alive', '^1.0.0'],
+  ])
+  const current = new Map([
+    ['@deepseek-ai/dsh-base', ''],
+    ['@deepseek-ai/dsh-web-app', '0.1.7-alpha.2'],
+    ['dsh-alive', '^1.1.0'],
+  ])
+  const { managed, platformOwned } = classifySpecUpdates(known, current)
+  assert.deepEqual(managed, [{ name: 'dsh-alive', from: '^1.0.0', to: '^1.1.0' }])
+  assert.deepEqual(platformOwned, [{ name: '@deepseek-ai/dsh-web-app', from: '', to: '0.1.7-alpha.2' }])
+  // An unchanged platform bundle never shows up in either bucket.
+  assert.deepEqual(classifySpecUpdates(known, known), { managed: [], platformOwned: [] })
+  // The bucket keys off `from`, not `to`: only a bundle that never had a
+  // dependency entry is platform-owned. A real dependency merely losing its
+  // entry (spec -> '') keeps the normal update path.
+  const dropped = classifySpecUpdates(new Map([['dsh-alive', '^1.0.0']]), new Map([['dsh-alive', '']]))
+  assert.deepEqual(dropped.managed, [{ name: 'dsh-alive', from: '^1.0.0', to: '' }])
+  assert.deepEqual(dropped.platformOwned, [])
 })
 
 test('missingPatches: finds recorded rows the live config lost', () => {

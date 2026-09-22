@@ -50,10 +50,12 @@ dsh plugin --profile web add some-plugin@latest   # 立即升级重载，不用�
 
 **dsh 0.1.6-alpha.2 起的协作方式**：平台自带的 `dsh-hmr` 接管了 profile 清单的监听，装/卸 bundle（bundles 列表变化）由它原生重组；但"只有依赖版本号变化"时它会直接返回，所以版本热升级仍由本插件负责。此时插件不再抢同一个监听路径（平台已注册），改为每秒轮询清单、只处理 spec 变化，并保留缓存驱逐、预检、回滚、紧急卸载整条链。新旧两代 HMR 服务方法名（`watchConfig` / `registerConfig`）都做了特性探测，同一份代码在两个 dsh 版本上都能跑；启动日志会写明当前处于哪种模式。
 
+**dsh 0.1.7-alpha.1 起**：`dsh.bundle.patch` 从"单个文件路径"扩展为**有序文件数组**（`dsh-web-app` 已改成 5 个文件：主补丁 + 4 个 agent preset），插件按**声明顺序**逐个解析并拼接，顺序与平台一致（行记录靠深度相等匹配，顺序错了就摘不掉行）；单文件声明照旧。另外，profile 模板自带的 bundle（`dsh-base` / `dsh-web-app`，在 `dependencies` 里**没有**条目）只做索引、不纳入版本热更新——它们的组合由平台自己负责，而"回滚到空 spec"会执行 `pnpm add <pkg>@`，那不是报错而是**装该包的 latest**（`dsh-web-app@` 会解析到 0.0.1-rc.1），属于静默降级。
+
 ## 开发与验证
 
 ```sh
-npm install && node --test test/   # 纯函数单测（diff / 解析 / 去重 / 移除 / 重放）
+npm install && npm test   # 纯函数单测（diff / 解析 / 去重 / 移除 / 重放 / 补丁声明）
 ```
 
 仓库自带一个测试用 bundle（`examples/dsh-hot-test-bundle`，装它后写一条激活日志），可用来做免重启的装/卸演练。要求 Node >= 20、带 HMR 的长驻表面（如 `dsh web`）；没有 HMR 的一次性命令行面会正常启动但永不激活监听。

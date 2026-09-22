@@ -253,3 +253,66 @@ bundle 的 `cordis.patch.yml` → 把其行注入 root include entry → 热生�
   另注意 granular token 名称不可重复、默认有效期 30 天（上次过期就是踩了这条）。
 - web profile 已装 `dsh-hot-installer@^0.5.1`（磁盘 0.5.1）；运行中的 web 进程
   仍是旧的 0.4.8 且 watcher 已死，**必须重启一次**才能加载 0.5.0+ 的兼容修复。
+
+## 0.5.2 记录（2026-09-22）— dsh 0.1.7-alpha.1 兼容（有序补丁文件数组 + 平台自有 bundle 排除）
+
+### 上游变更（读源码实测，未写进官方更新日志）
+- `dsh.bundle.patch` 从「单个文件字符串」扩展为「**有序文件数组**」（单文件声明仍合法）。
+  平台侧：`dsh-app-boot/lib/index.js:300-304 bundlePatchFiles()`（`typeof patch === "string" ? [patch] : patch`，
+  非法即抛 `dsh.bundle.patch must be a file path or a list of file paths`）、`:312-313 bundlePatchPaths()`、
+  `:728 patchPaths.flatMap((p) => loadOverlayPatches(binName, p))` → **按声明顺序 flatMap**。
+- 只有 `@deepseek-ai/dsh-web-app@0.1.7-alpha.1` 改了数组（5 个文件 = `./cordis.patch.yml` + 4 个 `./presets/*.patch.yml`）；
+  `0.1.6-alpha.2` / `0.1.5-rc.3` 的同名包仍是字符串；`dsh-base`、`@local/dsh-mcp-chrome-devtools` 也是字符串。
+- 0.1.7-alpha.1 的原生装/卸范围**未变**：`dsh-hmr/lib/index.js:353-376` 仍只在**有序 `dsh.profile.bundles` 变化**时重组
+  （`refresh(true)` 在 `:359` 提前 return）。依赖版本变化依旧是本插件的缺口，specOnly 模式照旧。
+- 稳定线对照：`latest`=0.1.5-rc.2 / `next`=0.1.5-rc.3 依赖 `cordis-plugin-hmr`（不监听清单；其 `dsh-app-boot@0.1.5-rc.3`
+  用 `join(packageDir, declared)` 只认字符串，数组声明在 boot 阶段就 fail-loud）。
+
+### 根因与修复
+- `readBundlePatch`（全文件唯一读 `dsh.bundle.patch` 之处）把 `declared` 直接给 `path.join` → 数组声明抛
+  `ERR_INVALID_ARG_TYPE`。修复：`string → [string]`；数组按**声明顺序**逐个 `join(packageDir, file)` + `parsePatchList`
+  再拼接；空数组 → `[]`；类型非法 → 与平台同义的清晰错误。**顺序是硬要求**：`removePatches` 靠 deepEqual 匹配平台
+  合成的顺序，顺序错了就摘不掉行。
+- 加固 (a)+(b) 合并为纯函数 `classifySpecUpdates(known, current)`：`from === ''` 的 bundle（profile 模板贡献、
+  `dependencies` 无条目）只索引记账、**不纳入 update 管理**。实现陷阱：**不能**把它们从 `known` 剔除——那样下一轮
+  `diffBundles` 会把它们当「新增」而走 hotInstall；必须保留 `known`/`bundlePatches`，只从 `updated` 排除。
+
+### 关键实测纠正（任务书原描述有误，事实以此为准）
+- **空 spec 的回滚不会失败**：实测 `pnpm add left-pad@` → **exit 0**，装 `latest`（写回 `^1.3.0`）。对
+  `@deepseek-ai/dsh-web-app@` 而言 `latest` 是 **0.0.1-rc.1**，且它声明的是**字符串**补丁 → 回滚后校验**通过** →
+  结局是**静默降级**（profile 被写 `^0.0.1-rc.1`，下次重启 Web 变旧），**不是** `emergencyUnmount`
+  （后者仍可达：回滚装到的版本没有可解析 `dsh.bundle` 时）。
+- 严重路径需**显式动作**：启动时 `known` 与 `current` 同源，`diffSpecs` 必为空；`from === ''` 的 spec 变化只能由
+  「显式给平台模板 bundle 补 dependency 条目」触发。日常症状仅一条 warn + 该 bundle 不进 `bundlePatches`。
+- **`node --test test/` 在本机是坏的**（Node 24.14.1/Windows：把 `test` 当模块 → `Cannot find module '...\test'`，
+  tests 1 / pass 0 / fail 1）。`node --test`（裸命令自动发现）与 `node --test test/smoke.mjs` 均 14/14。
+  故 `scripts.test` 用 `node --test`。
+
+### 验证
+- 单测 16/16（`npm test`）。
+- 真实包预跑：`readBundlePatch(web, '@deepseek-ai/dsh-web-app')` → 33 条 / 112 行；`dsh-base` → 1 条 / 92 行；
+  5 个 preset 文件都能被插件自己的 `parsePatchList` 解析（无空文件）。
+- **scratch 活测（0.1.7-alpha.1，profile `hot-017`，`link:` 本地构建，`--port 0 --no-open` 后台 boot）**：
+  1. `dsh --profile hot-017 --from-default-profile web --dump-config` 建档案（bundles = `dsh-base`+`dsh-web-app`，
+     `dependencies` 为空）；
+  2. 装本地构建后 boot → `active … hot-017\package.json …, v0.5.2`，**无** `cannot index @deepseek-ai/dsh-web-app` ✓
+     （对比：web profile 跑 0.5.1 时每次启动都有那条 warn）
+  3. `'' → 0.1.7-alpha.1` → `provided by the platform's profile template (no dependency spec to update) — … not hot-managed`，
+     **无** hotReload / rollback / pnpm / emergencyUnmount ✓
+  4. `0.1.7-alpha.1 → ^0.1.7-alpha.1` → `evicted 2 cached modules` →
+     `hot-reloaded @deepseek-ai/dsh-web-app (… , 33 patch entries)`，**不是** `update failed … rolling back`、
+     **不是** `emergencyUnmount` ✓（33 条 = 5 文件拼接，直接证明数组修复在升级预检路径生效）
+  5. 整段会话 81 行：`cannot index`/`emergencyUnmount`/`rolling back`/`rolled back`/`update failed`/`restart required` 全为 0；
+     重挂后 boot 日志出现**新端口**的 `dsh web:` 行且 HTTP 仍有应答（401 = 服务器在）→ 112 行行集真摘真挂、实例存活 ✓
+- 清理：kill scratch 进程、删 `~/.dsh/profiles/hot-017` 与临时目录；确认**未**写共享安装锚点
+  （`~/.dsh/profiles` 下无 `package.json`、无 `dsh-hot-installer` 链接）。web profile 全程未被本次测试改动。
+
+### 观察（未改，供后续）
+- `waitForRowsGone` 的 2s 有界等待对 **112 行**的 `dsh-web-app` 不够：重挂后会跟一条
+  `… the previous row was still mounted when the new one was added — verify the reload took effect`。这是既有的诚实警告
+  （去重按权威 `config.patches` 做，结果正确），但超大 bundle 值得放宽窗口——本次未改（超出范围）。
+- 测试脚本用 `Set-Content -Encoding utf8` 写 manifest 时带了 BOM，插件**正确地**报
+  `unreadable or torn JSON … retrying in 500ms` 并自行恢复（顺带证明该防护活着）；代价是 16 秒里 57 条 warn。BOM 是
+  脚本的错，不是插件的。
+- `~/.dsh/profiles/node_modules/@deepseek-ai/cordis-plugin-hmr` 是**悬空 junction**（改名后目标已不存在）——平台残留，未动。
+- `--dump-config-schema` 的 4 条 `unrecognized Loader tree carrier` 与本仓库无关，依旧不修。

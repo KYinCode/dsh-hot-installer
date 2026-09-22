@@ -50,10 +50,12 @@ Local-development `link:` installs have one known corner: on Windows pnpm links 
 
 **Division of labour since dsh 0.1.6-alpha.2**: the platform's own `dsh-hmr` now watches the profile manifest and reconciles bundle add/remove natively, but it returns early when only a dependency spec changed — so hot version upgrades remain this plugin's job. It no longer competes for the same watched path (the platform registered it first): instead it polls the manifest once a second and handles only spec changes, keeping cache eviction, pre-flight, rollback and emergency-unmount intact. Both HMR service method names (`watchConfig` / `registerConfig`) are feature-detected, so one build runs on either dsh generation; the startup log states which mode is active.
 
+**Since dsh 0.1.7-alpha.1**: `dsh.bundle.patch` widened from one file path to an **ordered list of files** (`dsh-web-app` now names five: its main patch plus four agent presets). The plugin parses and concatenates them in declaration order, matching the platform (`bundlePatchPaths()` then a `flatMap`) — the order is load-bearing, because recorded rows are matched against the live include config by deep equality and a differently ordered concatenation would fail to strip them. Single-path declarations behave exactly as before. Also, bundles the profile template contributes (`dsh-base` / `dsh-web-app`, which have **no** `dependencies` entry) are indexed but excluded from version updates: the platform owns how they are composed, and a "rollback to an empty spec" runs `pnpm add <pkg>@` — which does not fail, it installs that package's `latest` (`dsh-web-app@` resolves to 0.0.1-rc.1), a silent downgrade.
+
 ## Development
 
 ```sh
-npm install && node --test test/   # pure-helper unit tests (diff / parse / dedupe / remove / replay)
+npm install && npm test   # pure-helper unit tests (diff / parse / dedupe / remove / replay / patch declaration)
 ```
 
 The repo ships a throwaway test bundle (`examples/dsh-hot-test-bundle`, writes an activation log line) for a no-restart install/uninstall drill. Requires Node >= 20 and a long-lived HMR surface (e.g. `dsh web`); one-shot CLI surfaces boot normally but never start the watcher.
