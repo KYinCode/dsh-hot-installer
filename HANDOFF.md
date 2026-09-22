@@ -423,3 +423,52 @@ bundle 的 `cordis.patch.yml` → 把其行注入 root include entry → 热生�
 - ~~**待用户确认（可选）**：重启 dsh web 后该次启动日志应为 `active … v0.5.3`；除了上面那条 `agent-team-profile` 之外不应有别的 warn。~~
   → 用户已重启确认（19:24，PID 13328）：`active … v0.5.3`，`[error]` 0、`cannot index @deepseek-ai/dsh-web-app` 0；
   只剩那条 `agent-team-profile` 误报，已由 0.5.4 修掉。
+
+## 0.5.4 记录（2026-09-22）— 按平台的顺序解析：安装锚点优先
+
+### 起因（用户实测，且我上一轮判断错了）
+- 用户在 Web UI 里启用 `@deepseek-ai/dsh-experimental-agent-team-profile` 后，**每次启动一条**
+  `cannot index … for hot removal (cannot resolve … from C:\Users\KYin\.dsh\profiles\web)`；但该 bundle 其实**已正常挂载**：
+  `dsh --profile web --dump-config` 里能看到它贡献的 7 行（`agent-team` / `tool-agent-team` / `ui-agent-team` …）。
+- 真相：它是**随 dsh 安装自带**的包 —— `<dsh 安装目录>/node_modules/@deepseek-ai/dsh-experimental-agent-team-profile@0.1.7-alpha.1`
+  （Nodejs 与 NVM 两份安装树里都有），**既不在 profile 的 `node_modules`、也不在 `dependencies` 里**。
+  平台 `resolveBundleDir`（`dsh-app-boot:702-708`）**先试 `installAnchor`、失败才回落 profile**
+  （注释原文：in-box bundle "always comes from the same installation as the running dsh, never from a profile-local copy"）
+  → 平台找得到、挂得上；本插件此前**只按 profile 解析** → `undefined` → 误报。
+- **我上一轮据此写的"该包并未安装 / 是手工加进列表的"是错的**，已在上方划掉更正。用户的观察才是对的。
+
+### 修复
+- `resolveBundleDir(profileDir, packageName, installAnchor)`：两个锚点**按平台顺序**（安装锚点先、profile 后）各跑一遍
+  相同的 `createRequire(anchor).resolve.paths()` + `join` + `existsSync`；空/缺省锚点 = 旧行为（仅 profile）。
+- `installAnchor` 来源：**`ctx.get('profileContext').installAnchor`** —— `ProfileContext` 里本来就有这个字段
+  （`dsh-app-boot/lib/types/profile-context.d.ts:16`），正是启动器传给平台解析器的那个，**不需要猜路径、也不必从 `process.argv` 反推**
+  （0.5.3 里我估计"改动面比本修复大"，实测是 5 行）。`apply()` 内惰性读取并 memo（`installAnchorOf()`），
+  透传给起点索引、`hotReload` 的预检与缓存驱逐、回滚校验、added 分支；模块级 `hotInstall` 改成 options 对象收尾，
+  避免第 7 个位置参数。
+- 单测 17 → 18。
+
+### 验证
+- **一次运行同时比较"解析到的目录"与"解析出的补丁条目"**（平台侧用其导出的 `resolveBundleDir` / `bundlePatchPaths` /
+  `loadOverlayPatches`；`installAnchor` = 运行中的 `C:/Environment/Nodejs/nodejs/node_modules/@deepseek-ai/dsh/package.json`）：
+  web profile 全部 6 个 bundle → **dir mismatches 0 / parse mismatches 0**。逐条（括号内为旧行为）：
+  `dsh-base` 安装树 1 条、`dsh-web-app` 安装树 33 条、`dsh-hot-installer` profile 1 条、
+  `@local/dsh-mcp-chrome-devtools` profile 1 条、`voice-input` 安装树 1 条（旧：profile —— 0.5.3 那条残留的根）、
+  **`agent-team-profile` 安装树 5 条（旧：`ours=undefined`）**。
+- **scratch 活测**（profile `inbox-live`：web 模板 + `link:` 本地构建 + 只把它加进 `bundles`、故意不给 dependency 条目 = 完整复刻 in-box 形态）：
+  启动日志**只有一行** `active … polling …inbox-live\package.json …, v0.5.4`；`cannot index` = 0、`agent-team-profile` 零次提及；
+  `dsh --profile inbox-live --dump-config` 确认平台确实挂了它 7 行。
+  对照：0.5.2/0.5.3 期间同一条 warn 出现过 4 次（10:51:25 / 11:10:44 / 11:17:30 / 11:24:04）。
+- **真实 web profile 上的 A/B（最有力）**：0.5.4 安装触发的自更新会重跑 `apply()`（= 同一条起点索引循环），
+  日志为 `evicted 1 cached module for dsh-hot-installer (^0.5.3 -> ^0.5.4)` → `hot-reloaded` → `active … v0.5.4`，
+  **无任何 `cannot index`**；而**同一条路径**在 11:17:30（0.5.3 自更新时）明确打过那条 `agent-team-profile` warn。
+- 清理：kill scratch 进程、删 `inbox-live` profile 与全部临时脚本；共享锚点未污染、live web（PID 13328）健康。
+
+### 发布与上线（0.5.4 实际结果）
+- git：`a5c48f2` 已 push。**注意网络**：本次**直连连续 3 次失败**（`Recv failure: Connection was reset` / 连接超时），
+  最后用代理 `git -c http.proxy=http://127.0.0.1:7897 -c https.proxy=http://127.0.0.1:7897 push origin main` 才成功 ——
+  与上方「环境事实」里"直连反而快"的说法**相反**。结论：两个方向都可能挂，**直连与代理都要重试**。
+- npm：`dsh-hot-installer@0.5.4` 发布成功，`dist-tags.latest = 0.5.4`（19:32:10 发布、19:33:21 `npm view @0.5.4` 可见，约 71s）。
+- **发布物完整性**：`npm pack dsh-hot-installer@0.5.4` 的 `index.mjs` 与仓库、与 web profile 已安装那份 sha256 全等
+  （`69ED118ADC6FA12D…`）；发布出的 `package.json` = `version 0.5.4` + `scripts.test = node --test`。
+- web profile：依赖项 `^0.5.3` → `^0.5.4`，**bundles 列表与其它依赖未动**；运行中实例自更新成功并已是 0.5.4。
+- 用户若重启，该次启动日志应只剩 `active … v0.5.4` —— **那条 `agent-team-profile` 误报不会再出现**（已由本次修复消除）。
