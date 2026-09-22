@@ -307,6 +307,26 @@ bundle 的 `cordis.patch.yml` → 把其行注入 root include entry → 热生�
 - 清理：kill scratch 进程、删 `~/.dsh/profiles/hot-017` 与临时目录；确认**未**写共享安装锚点
   （`~/.dsh/profiles` 下无 `package.json`、无 `dsh-hot-installer` 链接）。web profile 全程未被本次测试改动。
 
+### 发布与上线（2026-09-22 实际结果）
+- npm：`dsh-hot-installer@0.5.2` 发布成功（`npm whoami` = `kyin_code`；`npm publish --cache "$PWD\.npm-cache"`）。
+  registry 传播约 **69s**：期间 `npm view dsh-hot-installer@0.5.2` 先是 E404、`dist-tags.latest` 还是 0.5.1，之后
+  `latest` 才变 0.5.2。**下次发布要留出这个窗口再装**（pnpm 的元数据缓存还会更滞后）。
+- web profile：`dsh plugin --profile web add dsh-hot-installer@0.5.2` → pnpm 自己就写成 **`^0.5.2`**（无需手工规范化），
+  其余依赖一行未动。注意这次 pnpm 很慢（约 4 分钟：`Request took 40395ms/48100ms`、sherpa-onnx 的
+  linux/darwin/ia32 平台包 `error (23)` 反复重试），本机需要的 `sherpa-onnx-win-x64` 在位；**别用管道 `Select-Object`
+  掐这个进程**（会被提前终止，且拿不到真实退出码）。
+- **运行中的 web 实例自更新成功**（无需重启即已跑 0.5.2 代码）：
+  `evicted 1 cached module for dsh-hot-installer (^0.5.1 -> ^0.5.2)` → `hot-reloaded dsh-hot-installer (…, 1 patch entry)`
+  → `active … v0.5.2`。热重载会重跑 `apply()`，也就是**启动索引循环在新代码下又跑了一遍**，且**没有再出现**
+  `cannot index @deepseek-ai/dsh-web-app`——这是该修复在真实 web profile 上的第一个实证。
+- **用「已安装的 0.5.2 产物」对真实 web profile 跑了一遍启动索引循环**（对 manifest 里全部 5 个 bundle 调
+  `readBundlePatch`）→ **0 失败**：`dsh-base` 1 条/92 行、**`dsh-web-app` 33 条/112 行**、`dsh-hot-installer` 1/1、
+  `@local/dsh-mcp-chrome-devtools` 1/1、`@deepseek-ai/dsh-experimental-voice-input-bundle` 1/4。
+  这条循环就是当初产出 warn 的那段代码，等价于「重启后不会再有 `cannot index`」。
+- git：`d7670ef` 已 push 到 `origin/main`（`main...origin/main` 无 ahead/behind）。
+- **待用户确认**：重启 dsh web 后该次启动的日志应为 `active … v0.5.2` 且**无** `cannot index`。重启不能由 agent 代做——
+  3080 上跑的正是承载会话的 GUI 实例。
+
 ### 观察（未改，供后续）
 - `waitForRowsGone` 的 2s 有界等待对 **112 行**的 `dsh-web-app` 不够：重挂后会跟一条
   `… the previous row was still mounted when the new one was added — verify the reload took effect`。这是既有的诚实警告
