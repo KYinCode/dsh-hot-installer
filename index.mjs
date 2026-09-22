@@ -272,16 +272,36 @@ function dedupeInsertRowsByDisabled(entries, disabled) {
 }
 
 /**
- * Resolve a bundle package's root directory from the profile: Node's own
- * node_modules lookup order anchored at the profile manifest, so the result
- * matches what the Loader imports and follows pnpm's symlinked layout.
+ * Resolve a bundle package's root directory the way the PLATFORM does: try the
+ * dsh installation first (`installAnchor`), then the profile — Node's own
+ * node_modules lookup order at each anchor, so the result matches what the
+ * Loader imports and follows pnpm's symlinked layout.
+ *
+ * The installation-first order is the platform's own contract
+ * (`resolveBundleDir` in dsh-app-boot: an in-box bundle "always comes from the
+ * same installation as the running dsh, never from a profile-local copy"). It
+ * matters twice over here:
+ *   - in-box bundles such as `@deepseek-ai/dsh-experimental-agent-team-profile`
+ *     ship INSIDE the installation and are absent from the profile's
+ *     node_modules entirely, so a profile-only lookup cannot see them at all
+ *     (that produced a spurious "cannot index <pkg>" for a bundle the platform
+ *     had happily mounted); and
+ *   - the winning anchor decides the path FORM, which the insert-name
+ *     anchoring has to match against the live include config.
+ *
+ * @param installAnchor - the running dsh app's package.json (`profileContext.installAnchor`); omitted resolves profile-only, as before.
  * @returns the package's absolute directory, or undefined when not installed.
  */
-export function resolveBundleDir(profileDir, packageName) {
-  const requireFromProfile = createRequire(join(profileDir, 'package.json'))
-  for (const searchPath of requireFromProfile.resolve.paths(packageName) ?? []) {
-    const candidate = join(searchPath, packageName)
-    if (existsSync(join(candidate, 'package.json'))) return candidate
+export function resolveBundleDir(profileDir, packageName, installAnchor) {
+  const anchors = []
+  if (typeof installAnchor === 'string' && installAnchor !== '') anchors.push(installAnchor)
+  anchors.push(join(profileDir, 'package.json'))
+  for (const anchor of anchors) {
+    const requireFromAnchor = createRequire(anchor)
+    for (const searchPath of requireFromAnchor.resolve.paths(packageName) ?? []) {
+      const candidate = join(searchPath, packageName)
+      if (existsSync(join(candidate, 'package.json'))) return candidate
+    }
   }
   return undefined
 }
@@ -509,11 +529,12 @@ export function patchRowIds(patches) {
  * are matched against the live include config by deep equality, so a
  * differently ordered concatenation would silently fail to strip them.
  *
+ * @param installAnchor - the running dsh app's package.json, so in-box bundles resolve like the platform resolves them.
  * @returns the parsed patch list, concatenated in declaration order (may be empty).
  * @throws when the declaration is neither a path nor a list of paths.
  */
-export async function readBundlePatch(profileDir, packageName) {
-  const packageDir = resolveBundleDir(profileDir, packageName)
+export async function readBundlePatch(profileDir, packageName, installAnchor) {
+  const packageDir = resolveBundleDir(profileDir, packageName, installAnchor)
   if (packageDir === undefined) {
     throw new Error(`cannot resolve ${packageName} from ${profileDir} — run 'dsh plugin --profile ${basename(profileDir)} install' if its dependency is not installed`)
   }
@@ -549,8 +570,8 @@ export async function readBundlePatch(profileDir, packageName) {
  * @returns the patch entries actually appended (empty when all rows were
  * already present); these are the exact values hotRemove must remove again.
  */
-async function hotInstall(ctx, includeEntry, profileDir, packageName, preParsedPatches, existingIds) {
-  const patches = preParsedPatches ?? (await readBundlePatch(profileDir, packageName))
+async function hotInstall(ctx, includeEntry, profileDir, packageName, { preParsedPatches, existingIds, installAnchor } = {}) {
+  const patches = preParsedPatches ?? (await readBundlePatch(profileDir, packageName, installAnchor))
   if (patches.length === 0) return []
   // The live tree lags an update that was just applied, so a reload passes the
   // authoritative config's row ids instead (see hotReload).
@@ -606,6 +627,26 @@ export async function apply(ctx) {
   }
   const manifestPath = join(profileDir, 'package.json')
 
+  // The running dsh app's package.json: the anchor the PLATFORM resolves bundles
+  // from first (`profileContext.installAnchor`). In-box bundles such as
+  // @deepseek-ai/dsh-experimental-agent-team-profile ship INSIDE the
+  // installation and are absent from the profile's node_modules entirely, so a
+  // profile-only lookup declares them uninstalled and warns about a bundle the
+  // platform had already mounted. Resolved lazily and memoized: every
+  // dsh-launched profile provides it, and a host without the service keeps the
+  // previous profile-only behaviour.
+  let cachedInstallAnchor
+  const installAnchorOf = () => {
+    if (cachedInstallAnchor === undefined) {
+      try {
+        const profileContext = ctx.get('profileContext')
+        const value = profileContext && profileContext.installAnchor
+        if (typeof value === 'string' && value !== '') cachedInstallAnchor = value
+      } catch { /* no profile context here: resolve from the profile only */ }
+    }
+    return cachedInstallAnchor
+  }
+
   // Snapshot of the bundle layer at mount time: bundle name -> dependency
   // spec. Only NEW names apply; changed specs reload; vanished names remove.
   let known = new Map()
@@ -630,7 +671,7 @@ export async function apply(ctx) {
   const bundlePatches = new Map()
   for (const packageName of known.keys()) {
     try {
-      const patches = await readBundlePatch(profileDir, packageName)
+      const patches = await readBundlePatch(profileDir, packageName, installAnchorOf())
       if (patches.length > 0) bundlePatches.set(packageName, patches)
     } catch (error) {
       log(ctx, 'warn', `cannot index ${packageName} for hot removal (${String(error)})`)
@@ -778,12 +819,12 @@ export async function apply(ctx) {
     // row. If the new patch cannot be resolved or parsed, the old row stays
     // mounted untouched and the caller logs restart-required — the failure
     // must never cost the user a working plugin.
-    const nextPatches = await readBundlePatch(profileDir, packageName)
+    const nextPatches = await readBundlePatch(profileDir, packageName, installAnchorOf())
     // Evict the bundle's modules BEFORE re-adding the row: the loader imports
     // by URL, so without eviction the re-added row would keep running the OLD
     // module forever (verified live — pre-0.4.6 "hot-reloaded" logs lied
     // about the code actually changing).
-    const packageDir = resolveBundleDir(profileDir, packageName)
+    const packageDir = resolveBundleDir(profileDir, packageName, installAnchorOf())
     if (packageDir) {
       const evicted = evictBundleModules(loader && loader.internal, packageDir, createRequire(join(profileDir, 'package.json')).cache)
       if (evicted > 0) log(ctx, 'info', `evicted ${evicted} cached module${evicted === 1 ? '' : 's'} for ${packageName} (${from} -> ${to})`)
@@ -803,7 +844,11 @@ export async function apply(ctx) {
     // Dedupe against the authoritative config, not the lagging tree: the rows
     // we just removed are gone from config.patches, so re-appending them
     // cannot duplicate a row we own.
-    const applied = await hotInstall(ctx, includeEntry, profileDir, packageName, nextPatches, patchRowIds(includeEntry.options.config.patches))
+    const applied = await hotInstall(ctx, includeEntry, profileDir, packageName, {
+      preParsedPatches: nextPatches,
+      existingIds: patchRowIds(includeEntry.options.config.patches),
+      installAnchor: installAnchorOf(),
+    })
     if (applied.length > 0) {
       bundlePatches.set(packageName, applied)
       log(ctx, 'info', `hot-reloaded ${packageName} (${from} -> ${to}, ${applied.length} patch entr${applied.length === 1 ? 'y' : 'ies'})`)
@@ -891,7 +936,7 @@ export async function apply(ctx) {
             // unverified "success" would re-trigger the update and loop
             // forever between the two specs.
             try {
-              await readBundlePatch(profileDir, update.name)
+              await readBundlePatch(profileDir, update.name, installAnchorOf())
               log(ctx, 'info', `rolled back ${update.name} to ${update.from} — reloading from the manifest`)
             } catch (verifyError) {
               log(ctx, 'error', `rollback of ${update.name} to ${update.from} did not restore a usable package (${String(verifyError)})`)
@@ -913,7 +958,7 @@ export async function apply(ctx) {
         // The platform mounts the new bundle's rows; index them so a later
         // version update can hot-reload this bundle.
         try {
-          const patches = await readBundlePatch(profileDir, packageName)
+          const patches = await readBundlePatch(profileDir, packageName, installAnchorOf())
           if (patches.length > 0) bundlePatches.set(packageName, patches)
         } catch (error) {
           log(ctx, 'warn', `cannot index ${packageName} for hot reload (${String(error)})`)
@@ -921,7 +966,7 @@ export async function apply(ctx) {
         continue
       }
       try {
-        const applied = await hotInstall(ctx, includeEntry, profileDir, packageName)
+        const applied = await hotInstall(ctx, includeEntry, profileDir, packageName, { installAnchor: installAnchorOf() })
         if (applied.length > 0) {
           bundlePatches.set(packageName, applied)
           log(ctx, 'info', `hot-applied ${packageName} (${applied.length} patch entr${applied.length === 1 ? 'y' : 'ies'})`)

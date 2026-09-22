@@ -54,6 +54,8 @@ dsh plugin --profile web add some-plugin@latest   # 立即升级重载，不用�
 
 **0.5.3 起补上的一个细节**：平台解析任何补丁文件时（bundle 补丁、`--patch` overlay、profile 补丁层），都会把 insert 行里**绝对路径 / `./` / `../` 开头的 `name`** 改写成"紧邻该补丁文件"的 `file://` URL。插件现在做同样的改写，否则记录的行与活配置里的行匹配不上：热卸会退化成 `rows already gone`、重挂被去重成空，行继续跑旧代码却不报错。裸包名（如 `@deepseek-ai/dsh-persona`）保持原样。
 
+**0.5.4 起**：解析 bundle 目录时复刻平台的顺序——**先找 dsh 安装树、再回落 profile**。随 dsh 自带的 bundle（`dsh-base`、`dsh-web-app`、`dsh-experimental-agent-team-profile` 等）**既不在 profile 的 `node_modules` 里、也不在 `dependencies` 里**；平台按安装锚点能正常挂载它们，而只按 profile 找就会误报"未安装"。锚点取自平台的 `profileContext.installAnchor`，取不到时保持旧行为。
+
 ## 开发与验证
 
 ```sh

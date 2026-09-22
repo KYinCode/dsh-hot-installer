@@ -43,6 +43,51 @@ test('resolveBundleDir: finds a package through the profile node_modules lookup'
   }
 })
 
+test('resolveBundleDir: the installation anchor wins, like the platform', async () => {
+  // In-box bundles ship inside the dsh installation and are absent from the
+  // profile's node_modules entirely, so a profile-only lookup cannot see them
+  // (that produced a spurious "cannot index" warn for a bundle the platform had
+  // mounted). The platform resolves installation-first; we must match that,
+  // including which copy wins when both trees have the package — the path FORM
+  // feeds the insert-name anchoring.
+  const root = await mkdtemp(join(tmpdir(), 'dsh-hot-installer-'))
+  try {
+    const installDir = join(root, 'install')
+    const profileDir = join(root, 'profile')
+    const make = async (base, name, marker) => {
+      const dir = join(base, 'node_modules', name)
+      await mkdir(dir, { recursive: true })
+      await writeFile(join(dir, 'package.json'), JSON.stringify({ name, marker }))
+      return dir
+    }
+    await mkdir(installDir, { recursive: true })
+    await mkdir(profileDir, { recursive: true })
+    await writeFile(join(installDir, 'package.json'), '{"name":"dsh-install"}')
+    await writeFile(join(profileDir, 'package.json'), '{"name":"profile"}')
+    const installAnchor = join(installDir, 'package.json')
+    const onlyInstall = await make(installDir, 'inbox-bundle', 'install')
+    const bothInstall = await make(installDir, 'shared-bundle', 'install')
+    const bothProfile = await make(profileDir, 'shared-bundle', 'profile')
+    const onlyProfile = await make(profileDir, 'local-bundle', 'profile')
+
+    // visible only through the installation tree
+    assert.equal(resolveBundleDir(profileDir, 'inbox-bundle', installAnchor), onlyInstall)
+    // profile-only packages still resolve through the profile
+    assert.equal(resolveBundleDir(profileDir, 'local-bundle', installAnchor), onlyProfile)
+    // present in both: the installation wins (the platform's contract)
+    assert.equal(resolveBundleDir(profileDir, 'shared-bundle', installAnchor), bothInstall)
+    assert.notEqual(bothInstall, bothProfile)
+    // no anchor supplied: unchanged, profile-only behaviour
+    assert.equal(resolveBundleDir(profileDir, 'shared-bundle'), bothProfile)
+    assert.equal(resolveBundleDir(profileDir, 'inbox-bundle'), undefined)
+    // an empty anchor is ignored rather than treated as a base
+    assert.equal(resolveBundleDir(profileDir, 'shared-bundle', ''), bothProfile)
+    assert.equal(resolveBundleDir(profileDir, 'nowhere-bundle', installAnchor), undefined)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
 test('parsePatchList: anchors inserted plugin paths beside the patch file', () => {
   // dsh-app-boot's parser rewrites insert `name` values that are paths into
   // file:// URLs anchored beside the patch file; the live include config holds

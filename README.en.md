@@ -54,6 +54,8 @@ Local-development `link:` installs have one known corner: on Windows pnpm links 
 
 **Since 0.5.3** the plugin mirrors one more platform detail: every patch file the platform parses (bundle patches, `--patch` overlays, the profile layer) has insert-row `name` values that are absolute or start with `./` / `../` rewritten into `file://` URLs anchored beside that patch file. Without the same rewrite the recorded rows no longer match the live include config: hot-remove degrades to `rows already gone`, the re-add dedupes to nothing, and the row keeps running stale code without any error. Bare package names (e.g. `@deepseek-ai/dsh-persona`) stay literal.
 
+**Since 0.5.4** bundle directories resolve in the platform's order: the dsh installation first, then the profile. Bundles that ship with dsh (`dsh-base`, `dsh-web-app`, `dsh-experimental-agent-team-profile`, …) are in **neither** the profile's `node_modules` nor its `dependencies`; the platform mounts them through the installation anchor, while a profile-only lookup reports them as not installed. The anchor comes from the platform's own `profileContext.installAnchor`, and is simply absent on hosts that do not expose it (previous behaviour).
+
 ## Development
 
 ```sh

@@ -4,6 +4,26 @@ dsh-hot-installer 的所有已发布版本。版本号遵循 SemVer；0.x 期间
 
 日期为发布者本地日期（UTC+8），与 npm 页面显示的日期一致。
 
+## [0.5.4] — 2026-09-22
+
+### 修复
+- **看不见「随 dsh 安装自带」的 bundle，误报 `cannot index <pkg>`**。实测触发：在 Web UI 里启用 `@deepseek-ai/dsh-experimental-agent-team-profile` 后，每次启动都有一条
+  `cannot index … for hot removal (cannot resolve …)`，可是该 bundle 已被平台正常挂载（`dsh --profile web --dump-config` 里能看到它贡献的 7 行）。
+  根因是**解析顺序**：平台 `resolveBundleDir`（dsh-app-boot `:702-708`）**先试 `installAnchor`（dsh 安装树）**、失败才回落 profile，契约是"in-box bundle 永远来自与当前 dsh 同一个安装，而不是 profile 本地副本"；本插件此前只按 profile 解析，而这类包（`dsh-base`、`dsh-web-app`、`voice-input`、`agent-team-profile` 等）**既不在 profile 的 `node_modules` 里、也不在 `dependencies` 里**，于是被判成"未安装"。
+  现在 `resolveBundleDir(profileDir, packageName, installAnchor)` 复刻平台的锚点顺序，`installAnchor` 取自 `ctx.get('profileContext').installAnchor`（`profile-context.d.ts:16` 暴露的就是启动器实际使用的那个），并透传给 `readBundlePatch` 与 `hotInstall`。取不到该服务时保持原行为（仅 profile），所以非 dsh 启动的宿主不受影响。
+
+### 影响
+- 误报消失，且 in-box bundle 现在能被本插件索引（可参与热卸载/热更新的行记录）。
+- 顺带修正**来源与路径形态**：in-box bundle 与平台读的是同一份、同一个路径字符串 —— 0.5.3 记录的那条残留（"安装树里的 bundle 若用相对 name，锚定 URL 会与平台不一致"）随之关闭。
+- profile 本地包（`dsh-hot-installer`、`@local/*` 等）行为不变：安装锚点里找不到它们，自然回落到 profile。
+
+### 新增
+- 单测 17 → 18：`resolveBundleDir` 的安装锚点优先 / profile 回落 / 两处都有时安装锚点胜出 / 空锚点被忽略。
+
+### 验证
+- **与平台逐条对照**（一次运行里同时比较"解析到的目录"和"解析出的补丁条目"）：web profile 全部 6 个 bundle **dir mismatches 0 / parse mismatches 0**；其中 `agent-team-profile` 两侧都落到安装树、都得到 5 个条目（旧代码这一项是 `ours=undefined`）。
+- **scratch 活测**（profile `inbox-live`：web 模板 + `link:` 本地构建 + 只把它加进 `bundles`、故意不给 dependency 条目，正是 in-box 形态）：启动日志**只有一行** `active … v0.5.4`、**无任何 warn**；`dump-config` 确认平台确实挂了它贡献的 7 行。对照：0.5.2/0.5.3 在同一形态下共留下 4 条 `cannot index @deepseek-ai/dsh-experimental-agent-team-profile`。
+
 ## [0.5.3] — 2026-09-22
 
 ### 修复
