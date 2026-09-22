@@ -327,10 +327,15 @@ bundle 的 `cordis.patch.yml` → 把其行注入 root include entry → 热生�
 - **发布物完整性**：`npm pack dsh-hot-installer@0.5.2` 解包后的 `index.mjs` 与仓库工作区、与 web profile 里已安装的那份
   **sha256 完全相同**（`B8A80A0FE6E3BF69…`）；发布出的 `package.json` 带 `version 0.5.2` 与 `scripts.test = node --test`。
   即「重启将加载的代码」= 「单测/scratch 活测过的代码」= 「仓库里的代码」。
-- **待用户确认**：重启 dsh web 后该次启动的日志应为 `active … v0.5.2` 且**无** `cannot index`。重启不能由 agent 代做——
-  3080 上跑的正是承载会话的 GUI 实例。
+- **重启确认（2026-09-22 19:02，用户操作）**：重启后 web profile 的启动日志段（`timestamp >= 11:02:05Z`）**只有一行**——
+  `[info] active — dsh reconciles profile bundles natively; polling …\profiles\web\package.json …, v0.5.2`；
+  该段 `[warn]`=0、`[error]`=0、`cannot index`=**0**（新 PID 33156 启动于 19:02:02，3080 归属 33156，HTTP 401 = 服务器在）。
+  全日志只剩 2 条历史 `cannot index`，都在重启前：`10:02:31` 的 `@deepseek-ai/dsh-web-app`
+  （0.5.1 的 `ERR_INVALID_ARG_TYPE`，即本次修复对象）与 `10:51:25` 的
+  `@deepseek-ai/dsh-experimental-agent-team-profile`（列进 bundles 但包未安装，与本 bug 无关，该 bundle 现已不在列表里）。
 
-- **与平台解析器的逐条对照（0.5.2 已验）**：平台 `parsePatchList`（`dsh-app-boot/lib/index.js:3185-3197`）与本插件的
+### 与平台解析器的逐条对照
+- **语义一致**：平台 `parsePatchList`（`dsh-app-boot/lib/index.js:3185-3197`）与本插件的
   同名函数语义一致——同一个 `JSON_SCHEMA.extend(JsExpr)` 方言、空文件/非数组同样抛 `must be a top-level YAML array of
   loader patch entries`、非 mapping 条目同样抛 `entry N … must be a mapping`；bundle 补丁也走
   `loadOverlayPatches() → parsePatchList()`（`:728`），所以数组声明下多个文件的解析口径与平台相同。
