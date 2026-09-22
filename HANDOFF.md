@@ -324,6 +324,9 @@ bundle 的 `cordis.patch.yml` → 把其行注入 root include entry → 热生�
   `@local/dsh-mcp-chrome-devtools` 1/1、`@deepseek-ai/dsh-experimental-voice-input-bundle` 1/4。
   这条循环就是当初产出 warn 的那段代码，等价于「重启后不会再有 `cannot index`」。
 - git：`d7670ef` 已 push 到 `origin/main`（`main...origin/main` 无 ahead/behind）。
+- **发布物完整性**：`npm pack dsh-hot-installer@0.5.2` 解包后的 `index.mjs` 与仓库工作区、与 web profile 里已安装的那份
+  **sha256 完全相同**（`B8A80A0FE6E3BF69…`）；发布出的 `package.json` 带 `version 0.5.2` 与 `scripts.test = node --test`。
+  即「重启将加载的代码」= 「单测/scratch 活测过的代码」= 「仓库里的代码」。
 - **待用户确认**：重启 dsh web 后该次启动的日志应为 `active … v0.5.2` 且**无** `cannot index`。重启不能由 agent 代做——
   3080 上跑的正是承载会话的 GUI 实例。
 
