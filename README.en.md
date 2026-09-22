@@ -13,6 +13,8 @@
 
 So on the stable line this plugin is not redundant — it *is* the mechanism; on the newer alpha line it still earns its place (the platform neither handles version upgrades nor rolls back a failed one). If the platform ever covers both, this plugin can be uninstalled.
 
+> This matrix was re-verified on 2026-09-22 in an isolated environment: `@deepseek-ai/dsh@0.1.5-rc.2` installed into a temp directory with both `DSH_HOME` and `USERPROFILE` redirected, then `dsh-hot-installer@0.5.4` installed through that old version's own CLI and booted. It logged `hot install/remove/reload enabled, v0.5.4` (full capability), `hot-applied` mounted the target bundle live, and `hot-removed` unloaded it again.
+
 ## What it is
 
 In DeepSeek Harness everything is a plugin, but after `dsh plugin --profile web add <pkg>` you had to restart `dsh web` for the new bundle to mount — the profile's bundle list (`dsh.profile.bundles` in `package.json`) is only read at startup and nothing in the running process watches it. Removal was worse: `dsh plugin remove <pkg>` deletes the package from disk, but the mounted plugin row stays alive in memory, so the next page reload shows "Failed to load plugins" — the client still asks the deleted package for its code. Version updates were equally cold: the new code only loaded on restart.

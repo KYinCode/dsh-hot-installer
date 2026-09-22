@@ -13,6 +13,8 @@
 
 结论：稳定版用户装它**不是没用，而是全靠它**；alpha 新版用户装它仍有价值（平台不管版本升级，也不做失败回滚）。哪天平台把这两件也做了，这个插件就可以卸载了。
 
+> 该矩阵已于 2026-09-22 用隔离环境实测复核：把 `@deepseek-ai/dsh@0.1.5-rc.2` 装到临时目录、`DSH_HOME`/`USERPROFILE` 双隔离后，用**旧版自己的 CLI** 装 `dsh-hot-installer@0.5.4` 并启动——日志为 `hot install/remove/reload enabled, v0.5.4`（完整能力模式），热装 `hot-applied` + 目标 bundle 当场激活、热卸 `hot-removed` 全部成功。
+
 ## 这是什么
 
 DeepSeek Harness 里一切皆插件，但你用 `dsh plugin --profile web add <pkg>` 装一个新 bundle 后，必须重启 `dsh web` 它才生效——因为 profile 的插件清单（`package.json` 里的 `dsh.profile.bundles`）只在启动时读取，运行中的进程不会再看它。卸载更糟：`dsh plugin remove <pkg>` 把包从磁盘删掉，但已挂载的插件行还留在内存里，此时刷新网页会看到 "Failed to load plugins" 报错（客户端还在向已删除的包要代码）。版本更新同样冷：新代码要等重启才会被加载。

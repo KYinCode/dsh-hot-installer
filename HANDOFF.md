@@ -472,3 +472,46 @@ bundle 的 `cordis.patch.yml` → 把其行注入 root include entry → 热生�
   （`69ED118ADC6FA12D…`）；发布出的 `package.json` = `version 0.5.4` + `scripts.test = node --test`。
 - web profile：依赖项 `^0.5.3` → `^0.5.4`，**bundles 列表与其它依赖未动**；运行中实例自更新成功并已是 0.5.4。
 - 用户若重启，该次启动日志应只剩 `active … v0.5.4` —— **那条 `agent-team-profile` 误报不会再出现**（已由本次修复消除）。
+
+## 旧版 dsh 兼容性实测（2026-09-22）— 「最新插件能不能跑在旧 dsh 上」
+
+用户直接发问，故不靠推理、做了隔离实测。
+
+### 方法（双隔离，确保不碰用户真实环境）
+- `%TEMP%\olddsh` 里 `npm install @deepseek-ai/dsh@0.1.5-rc.2`（npm `latest`，即"普通用户默认装到的"那一代，也是**没有 `dsh-hmr` 的老一代**）。
+- 子进程同时设 `DSH_HOME=<temp>\home` **与** `USERPROFILE=<temp>\userprofile`（后者兜住 `os.homedir()` 路径）。
+  实测：旧 dsh 在 `<temp>\home\profiles` 下自建档案，真实 `~/.dsh/profiles` 未变、真实插件日志 mtime 未变。
+- 用**旧 dsh 自己的 CLI**（`node <temp>\node_modules\@deepseek-ai\dsh\lib\bin.js`）建 profile、装插件、boot。
+
+### 途中发现的平台侧打包问题（与本插件无关，但值得记）
+- 直接从干净目录装 `@deepseek-ai/dsh@latest`(0.1.5-rc.2) **会失败**：
+  `ETARGET No matching version found for @deepseek-ai/dsh-client-ui-sidebar-documentpreview@^0.1.5-rc.3`。
+  链路：`dsh@0.1.5-rc.2` 对 `dsh-web-app` 的范围会解析到 **rc.3**，而 `dsh-web-app@0.1.5-rc.3` 依赖
+  `dsh-client-ui-sidebar-documentpreview@^0.1.5-rc.3` —— 该子包**从未发布 rc.3**
+  （versions 只有 `0.1.5-alpha.2 / 0.1.5-rc.1 / 0.1.5-rc.2 / 0.1.6-alpha.1 / 0.1.6-alpha.2 / 0.1.7-alpha.1`）。
+  `@next`(0.1.5-rc.3) 同样失败。→ 现在"稳定线全新安装"是坏的（已有安装/lockfile 的用户不受影响）。
+  本次用 npm `overrides` 把 `@deepseek-ai/dsh-web-app` 与 `...-documentpreview` 都钉到 `0.1.5-rc.2`，才装出可运行的 520 包树。
+
+### 实测结果（旧 dsh 0.1.5-rc.2 + 本插件 0.5.4，`link:` 安装）
+- **启动**：`[info] active — watching <home>\profiles\compat\package.json for new/removed/updated profile bundles (hot install/remove/reload enabled, v0.5.4)`
+  → 进的是**非 specOnly**（老一代 HMR 的 `registerConfig` 路径），说明 0.5.0 的特性探测在旧版正确生效；`cannot index` = 0、`[error]` = 0。
+- **热装**：`hot-applied dsh-hot-test-bundle (1 patch entry)`，且 `examples/dsh-hot-test-bundle` 自己的激活日志
+  （`<home>\logs\dsh-hot-test-bundle\…log`）在**运行中**写入（11:44:30）→ 行真的挂上、全程未重启 ✓
+- **热卸**：`manifest change: removed bundle(s) dsh-hot-test-bundle` → `hot-removed dsh-hot-test-bundle (1 patch entry)` ✓
+- **结论：旧版 dsh 能用最新插件，且是完整能力模式（装/卸都热）。** README 的版本矩阵这一行得到实测支持。
+
+### 唯一 caveat：0.5.4 的安装锚点改进在旧版**不生效**（但不是回归）
+- 旧版 `dsh-app-boot` 里 **`profileContext` 出现 0 次**、也没有 `profile-context.d.ts`（0.1.5-rc.2 与 rc.3 都是）。
+  所以 `installAnchorOf()` 在旧版返回 `undefined` → `resolveBundleDir` 退回"仅 profile" = **0.5.3 以前的行为**。
+- 为什么旧版没暴露问题：平台会把安装依赖闭包**镜像**到 `<DSH_HOME>/profiles/node_modules`
+  （实测旧 home 该目录 **187 个条目**，含 `dsh-base` / `dsh-web-app`），而它是每个 profile 的祖先目录 →
+  我们的向上查找照样命中，日志里没有 `cannot index`。
+- 盲区的触发条件因此很明确：**in-box 包不在 profile 的依赖闭包里**（所以没被镜像）。
+  0.1.7 上 `agent-team-profile` 正是如此（被 UI 列进 bundles 但从不是依赖）→ 0.5.4 的安装锚点修复解决的正是这一种。
+- 若要让旧版也覆盖这种情形：可用 `process.argv[1]`（旧 dsh 的 `lib/bin.js`）反推安装锚点作为 fallback
+  （`createRequire(argv[1]).resolve.paths(pkg)` 会向上走到 `<install>/node_modules`）。**本次未做**，属可选加固。
+
+### 顺带确认（静态）
+- 旧版 app-boot **有** `anchorInsertedPluginNames`（rc.2/rc.3 各 2 处）→ 0.5.3 的 name 锚定改写对旧版同样正确。
+- 旧版 `resolveBundleDir` 同样是 `for (const anchor of [installAnchor, join(profileDir, "package.json")])` → **安装锚点优先**，与 0.1.7 一致。
+- 旧版 bundle 补丁只接受字符串（`join(packageDir, declared)`）→ 0.5.2 的数组支持在旧版是纯超集，无副作用。
