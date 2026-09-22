@@ -404,3 +404,16 @@ bundle 的 `cordis.patch.yml` → 把其行注入 root include entry → 热生�
 - 另注：`~/.dsh/profiles/web/package.json` 当前把 `@deepseek-ai/dsh-experimental-agent-team-profile` 列进了 bundles（共 6 个），
   但该包并未安装 → **下次启动会有 1 条** `cannot index @deepseek-ai/dsh-experimental-agent-team-profile for hot reload`
   （`cannot resolve … run 'dsh plugin --profile web install'`）。这是正确诊断（列了却没装），与 0.5.2/0.5.3 的修复无关。
+
+### 发布与上线（0.5.3 实际结果）
+- npm：`dsh-hot-installer@0.5.3` 发布成功，`dist-tags.latest = 0.5.3`（传播约 **1 分 55 秒**：19:14:39 发布、19:16:20 `npm view @0.5.3` 才可见）。
+- **发布物完整性**：`npm pack dsh-hot-installer@0.5.3` 解包后的 `index.mjs` 与仓库工作区、与 web profile 已安装那份
+  **sha256 完全相同**（`CB9C75C1818128DD…`）；发布出的 `package.json` = `version 0.5.3` + `scripts.test = node --test`；
+  发布物里 `anchorInsertedPluginNames` 出现 3 次（定义 + 调用 + 注释引用）。
+- web profile：`dsh plugin --profile web add dsh-hot-installer@0.5.3` → 依赖项由 `^0.5.2` 变 `^0.5.3`，**bundles 列表与其它依赖一行未动**；
+  运行中的实例自更新：`evicted 1 cached module for dsh-hot-installer (^0.5.2 -> ^0.5.3)` → `hot-reloaded` → `active … v0.5.3`。
+  这次 pnpm 依旧慢（1m 3.9s 完成安装，之后还在为 sherpa-onnx 的 darwin/linux 可选包重试 `error (23)`，整条命令 5 分钟才退出 0）。
+- **预期内的那条 warn 已复现**：自更新重跑 `apply()` 时日志出现
+  `cannot index @deepseek-ai/dsh-experimental-agent-team-profile for hot removal` —— 即上面「另注」说的情形（列进 bundles 但包没装）。
+  它与 0.5.2/0.5.3 的修复无关；要让它消失，用户需二选一：`dsh plugin --profile web install` 装上它，或把它从 `dsh.profile.bundles` 移除。
+- **待用户确认（可选）**：重启 dsh web 后该次启动日志应为 `active … v0.5.3`；除了上面那条 `agent-team-profile` 之外不应有别的 warn。
